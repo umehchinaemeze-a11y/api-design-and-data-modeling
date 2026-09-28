@@ -1,0 +1,56 @@
+--- QUERY 3: Detailed Trip Manifest & Audit Trail ---
+Trip ID: 40467c99-6f47-4213-af21-a199c08766d7
+SQL:
+SELECT 
+      t.id AS trip_id,
+      t.status,
+      t.fare_amount_minor,
+      t.currency,
+      t.driver_name_snapshot,
+      t.vehicle_description_snapshot,
+      t.pickup_address,
+      t.destination_address,
+      t.requested_at,
+      t.accepted_at,
+      t.started_at,
+      t.completed_at,
+      p.id AS payment_id,
+      p.amount_minor AS payment_amount_minor,
+      p.currency AS payment_currency,
+      p.status AS payment_status,
+      p.provider_reference,
+      p.paid_at,
+      r.id AS review_id,
+      r.rating AS review_rating,
+      r.comment AS review_comment
+    FROM trips t
+    LEFT JOIN payments p ON p.trip_id = t.id
+    LEFT JOIN reviews r ON r.trip_id = t.id
+    WHERE t.id = $1;
+
+OUTPUT:
+[
+  {
+    "trip_id": "40467c99-6f47-4213-af21-a199c08766d7",
+    "status": "COMPLETED",
+    "fare_amount_minor": "851000",
+    "currency": "NGN",
+    "driver_name_snapshot": "Emeka Obi",
+    "vehicle_description_snapshot": "Honda Civic (Midnight Blue) - KJA-582-AA",
+    "pickup_address": "Murtala Muhammed Airport T2, Ikeja",
+    "destination_address": "Lekki Phase 1, Admiralty Way",
+    "requested_at": "2026-09-27T07:27:50.514Z",
+    "accepted_at": "2026-09-27T07:29:50.514Z",
+    "started_at": "2026-09-27T07:37:50.514Z",
+    "completed_at": "2026-09-27T08:07:50.514Z",
+    "payment_id": "e8e76ff7-ba4e-4639-8f04-65b333672f81",
+    "payment_amount_minor": "851000",
+    "payment_currency": "NGN",
+    "payment_status": "COMPLETED",
+    "provider_reference": "pay_ref_1_40467c99",
+    "paid_at": "2026-09-27T08:07:50.514Z",
+    "review_id": "94f64da8-5cd3-4e77-b487-1685c0b5ebaa",
+    "review_rating": 5,
+    "review_comment": "Arrived promptly, smooth drive through Lagos traffic."
+  }
+]

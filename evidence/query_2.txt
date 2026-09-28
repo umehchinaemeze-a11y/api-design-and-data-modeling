@@ -1,0 +1,58 @@
+--- QUERY 2: Driver Available Pending Queue ---
+SQL:
+SELECT 
+      id AS trip_id,
+      pickup_address,
+      destination_address,
+      fare_amount_minor,
+      currency,
+      requested_at
+    FROM trips
+    WHERE status = 'REQUESTED' 
+      AND driver_id IS NULL
+    ORDER BY requested_at DESC
+    LIMIT 10;
+
+OUTPUT:
+[
+  {
+    "trip_id": "9ae9c1a5-a06b-47f1-8b93-6db7e07b9033",
+    "pickup_address": "Maryland Mall, Ikorodu Road",
+    "destination_address": "Civic Centre, Ozumba Mbadiwe, VI",
+    "fare_amount_minor": "420000",
+    "currency": "NGN",
+    "requested_at": "2026-09-28T08:25:51.990Z"
+  },
+  {
+    "trip_id": "ff96cd6d-74c7-46e7-bd2b-fb0fb0605b40",
+    "pickup_address": "Palms Shopping Mall, Lekki",
+    "destination_address": "Landmark Beach, Oniru",
+    "fare_amount_minor": "250000",
+    "currency": "NGN",
+    "requested_at": "2026-09-28T08:22:51.993Z"
+  },
+  {
+    "trip_id": "0cb5615b-7cbc-4618-a767-6ba152c7cd02",
+    "pickup_address": "Opebi Road, Salvation Bus Stop",
+    "destination_address": "Murtala Muhammed Airport Terminal 1",
+    "fare_amount_minor": "380000",
+    "currency": "NGN",
+    "requested_at": "2026-09-28T08:19:51.996Z"
+  },
+  {
+    "trip_id": "b165787f-6779-4893-99a8-e4419a9f335e",
+    "pickup_address": "Lekki Conservation Centre",
+    "destination_address": "Novare Mall, Sangotedo",
+    "fare_amount_minor": "490000",
+    "currency": "NGN",
+    "requested_at": "2026-09-28T08:16:51.999Z"
+  },
+  {
+    "trip_id": "10c59d5b-68f0-49da-b660-a9a50124eff9",
+    "pickup_address": "Unilag Main Gate, Akoka",
+    "destination_address": "Silverbird Galleria, Ahmadu Bello Way",
+    "fare_amount_minor": "360000",
+    "currency": "NGN",
+    "requested_at": "2026-09-28T08:13:52.002Z"
+  }
+]

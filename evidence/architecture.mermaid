@@ -1,0 +1,54 @@
+flowchart TD
+    subgraph Clients["Clients Layer"]
+        RiderClient["Rider Client (Mobile/Web)"]
+        DriverClient["Driver Client (Mobile/Web)"]
+    end
+
+    subgraph APILayer["API & Ingress Layer (/api/v1)"]
+        RESTRouter["REST Router & Request Validator"]
+        IdempotencyGuard["Idempotency Filter (Redis/Cache Key)"]
+        StateGuard["State Machine Controller"]
+        AuthMock["Auth / Identity Context Mock"]
+    end
+
+    subgraph RealTime["Real-Time Transport (Design Only)"]
+        SSEHub["Server-Sent Events (SSE) Hub\n(Trip Tracking Stream)"]
+        LocationIngest["Driver Telematics Endpoint\n(HTTP POST location payload)"]
+    end
+
+    subgraph DatabaseLayer["PostgreSQL 16 Engine"]
+        subgraph Tables["Relational Storage"]
+            T_Riders["riders"]
+            T_Drivers["drivers"]
+            T_Vehicles["vehicles"]
+            T_Trips["trips"]
+            T_Payments["payments"]
+            T_Reviews["reviews"]
+        end
+
+        subgraph Invariants["Declarative & Procedural Invariants"]
+            IdxRiderActive["idx_trips_single_active_rider\n(Partial Unique Index)"]
+            IdxDriverActive["idx_trips_single_active_driver\n(Partial Unique Index)"]
+            TrgTransition["trg_enforce_trip_status_transition\n(PL/pgSQL State Guard)"]
+            TrgReview["trg_enforce_review_completion\n(PL/pgSQL Completion Guard)"]
+        end
+    end
+
+    %% Client flows
+    RiderClient -->|"POST /api/v1/trips"| RESTRouter
+    RiderClient -->|"GET /api/v1/trips/:id/live-stream"| SSEHub
+    RiderClient -->|"POST /api/v1/trips/:id/reviews"| RESTRouter
+    DriverClient -->|"POST /api/v1/trips/:id/accept"| RESTRouter
+    DriverClient -->|"POST /api/v1/trips/:id/start"| RESTRouter
+    DriverClient -->|"POST /api/v1/trips/:id/complete"| RESTRouter
+    DriverClient -->|"POST /api/v1/drivers/location"| LocationIngest
+
+    LocationIngest -.->|"Push live GPS coordinates"| SSEHub
+    SSEHub -.->|"Stream lat/lng & ETA updates"| RiderClient
+
+    RESTRouter --> IdempotencyGuard --> StateGuard --> DatabaseLayer
+    
+    T_Trips -.->|"Guarded by"| IdxRiderActive
+    T_Trips -.->|"Guarded by"| IdxDriverActive
+    T_Trips -.->|"Enforced by"| TrgTransition
+    T_Reviews -.->|"Enforced by"| TrgReview

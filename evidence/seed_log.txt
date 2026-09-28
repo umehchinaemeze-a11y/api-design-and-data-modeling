@@ -1,0 +1,17 @@
+--- DATABASE SEED LOG ---
+Timestamp: 2026-09-28T07:35:25.679Z
+Database: urbanglide_db
+
+STATUS: SUCCESS
+Dataset summary:
+- 10 Riders created
+- 10 Drivers created
+- 10 Active vehicles created
+- 200 Completed historical trips created
+- 200 Settled payments created
+- 150 Ratings & reviews created
+- 15 Cancelled trips created
+- 5 Available REQUESTED trips created
+- 1 Active ACCEPTED trip created
+- 1 Active IN_PROGRESS trip created
+- ANALYZE execution executed across all tables.

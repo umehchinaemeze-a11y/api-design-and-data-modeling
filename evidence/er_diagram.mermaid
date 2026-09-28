@@ -1,0 +1,96 @@
+erDiagram
+    RIDERS ||--o{ TRIPS : "requests (1:N)"
+    DRIVERS ||--o{ TRIPS : "fulfills (1:N)"
+    DRIVERS ||--o{ VEHICLES : "registers (1:N)"
+    VEHICLES ||--o{ TRIPS : "used_in (1:N)"
+    TRIPS ||--|| PAYMENTS : "settles (1:1)"
+    TRIPS ||--o| REVIEWS : "evaluated_by (1:0..1)"
+    RIDERS ||--o{ REVIEWS : "authors (1:N)"
+    DRIVERS ||--o{ REVIEWS : "receives (1:N)"
+
+    RIDERS {
+        uuid id PK
+        varchar name
+        varchar email UK
+        varchar phone UK
+        timestamptz created_at
+        timestamptz updated_at
+        timestamptz deleted_at
+    }
+
+    DRIVERS {
+        uuid id PK
+        varchar name
+        varchar email UK
+        varchar phone UK
+        varchar license_number UK
+        driver_status_enum status
+        timestamptz created_at
+        timestamptz updated_at
+        timestamptz deleted_at
+    }
+
+    VEHICLES {
+        uuid id PK
+        uuid driver_id FK
+        varchar registration_number UK
+        varchar make
+        varchar model
+        int year
+        varchar color
+        vehicle_type_enum vehicle_type
+        boolean is_active
+        timestamptz created_at
+        timestamptz updated_at
+        timestamptz deleted_at
+    }
+
+    TRIPS {
+        uuid id PK
+        uuid rider_id FK
+        uuid driver_id FK
+        uuid vehicle_id FK
+        numeric pickup_latitude
+        numeric pickup_longitude
+        varchar pickup_address
+        numeric destination_latitude
+        numeric destination_longitude
+        varchar destination_address
+        trip_status_enum status
+        bigint fare_amount_minor
+        varchar currency
+        varchar driver_name_snapshot
+        varchar vehicle_description_snapshot
+        timestamptz requested_at
+        timestamptz accepted_at
+        timestamptz started_at
+        timestamptz completed_at
+        timestamptz cancelled_at
+        varchar cancellation_reason
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
+    PAYMENTS {
+        uuid id PK
+        uuid trip_id FK,UK
+        bigint amount_minor
+        varchar currency
+        payment_status_enum status
+        varchar provider_reference UK
+        varchar payment_method
+        timestamptz paid_at
+        timestamptz created_at
+        timestamptz updated_at
+    }
+
+    REVIEWS {
+        uuid id PK
+        uuid trip_id FK,UK
+        uuid rider_id FK
+        uuid driver_id FK
+        int rating
+        text comment
+        timestamptz created_at
+        timestamptz updated_at
+    }

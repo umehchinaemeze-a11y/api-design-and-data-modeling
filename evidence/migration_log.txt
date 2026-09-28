@@ -1,0 +1,7 @@
+--- MIGRATION RUN LOG ---
+Timestamp: 2026-09-28T07:35:25.236Z
+Target: PostgreSQL 16 on port 15436
+Database: urbanglide_db
+
+STATUS: SUCCESS
+All tables (riders, drivers, vehicles, trips, payments, reviews), enums, triggers, check constraints, and partial indexes created without error.

@@ -1,0 +1,23 @@
+--- EXPLAIN ANALYZE: Rider Completed Trip History ---
+Target Index: idx_trips_rider_completed
+Rider: Amara Okafor (8ba55315-af73-4f23-86f9-c0b5d90f53ed)
+
+Limit  (cost=0.29..17.11 rows=5 width=159) (actual time=0.038..0.053 rows=5 loops=1)
+  Output: t.id, t.status, t.fare_amount_minor, t.currency, t.driver_name_snapshot, t.vehicle_description_snapshot, t.pickup_address, t.destination_address, t.completed_at, p.status
+  Buffers: shared hit=13
+  ->  Nested Loop Left Join  (cost=0.29..67.58 rows=20 width=159) (actual time=0.037..0.051 rows=5 loops=1)
+        Output: t.id, t.status, t.fare_amount_minor, t.currency, t.driver_name_snapshot, t.vehicle_description_snapshot, t.pickup_address, t.destination_address, t.completed_at, p.status
+        Inner Unique: true
+        Buffers: shared hit=13
+        ->  Index Scan using idx_trips_rider_completed on public.trips t  (cost=0.14..40.32 rows=20 width=155) (actual time=0.019..0.023 rows=5 loops=1)
+              Output: t.id, t.rider_id, t.driver_id, t.vehicle_id, t.pickup_latitude, t.pickup_longitude, t.pickup_address, t.destination_latitude, t.destination_longitude, t.destination_address, t.status, t.fare_amount_minor, t.currency, t.driver_name_snapshot, t.vehicle_description_snapshot, t.requested_at, t.accepted_at, t.started_at, t.completed_at, t.cancelled_at, t.cancellation_reason, t.created_at, t.updated_at
+              Index Cond: (t.rider_id = '8ba55315-af73-4f23-86f9-c0b5d90f53ed'::uuid)
+              Buffers: shared hit=3
+        ->  Index Scan using payments_trip_id_key on public.payments p  (cost=0.14..1.36 rows=1 width=20) (actual time=0.004..0.004 rows=1 loops=5)
+              Output: p.id, p.trip_id, p.amount_minor, p.currency, p.status, p.provider_reference, p.payment_method, p.paid_at, p.created_at, p.updated_at
+              Index Cond: (p.trip_id = t.id)
+              Buffers: shared hit=10
+Planning:
+  Buffers: shared hit=8
+Planning Time: 0.728 ms
+Execution Time: 0.166 ms

@@ -1,0 +1,36 @@
+--- QUERY 1: Rider Active Trip Lookup ---
+Rider: Amara Okafor (8ba55315-af73-4f23-86f9-c0b5d90f53ed)
+SQL:
+SELECT 
+      t.id AS trip_id,
+      t.status,
+      t.driver_name_snapshot,
+      t.vehicle_description_snapshot,
+      t.pickup_address,
+      t.destination_address,
+      t.fare_amount_minor,
+      t.currency,
+      t.requested_at,
+      t.accepted_at,
+      t.started_at
+    FROM trips t
+    WHERE t.rider_id = $1 
+      AND t.status IN ('REQUESTED', 'ACCEPTED', 'IN_PROGRESS')
+    LIMIT 1;
+
+OUTPUT:
+[
+  {
+    "trip_id": "2faa45a6-8496-475f-a795-35ee51d1c037",
+    "status": "ACCEPTED",
+    "driver_name_snapshot": "Ibrahim Musa",
+    "vehicle_description_snapshot": "Hyundai Elantra (Black) - RBC-394-CD",
+    "pickup_address": "1004 Estate, Victoria Island",
+    "destination_address": "Twinwaters Lagos, Okunde Bluewater Zone",
+    "fare_amount_minor": "350000",
+    "currency": "NGN",
+    "requested_at": "2026-09-28T08:17:52.005Z",
+    "accepted_at": "2026-09-28T08:19:52.005Z",
+    "started_at": null
+  }
+]

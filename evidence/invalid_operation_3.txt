@@ -1,0 +1,18 @@
+--- INVALID OPERATION 3: Review for Incomplete Trip ---
+Requirement: FR-09 (Reviews allowed only after trip is completed)
+Target Trip: 5cd6560d-b927-453f-a12f-bf363da2637b (status: IN_PROGRESS)
+
+SQL ATTEMPTED:
+INSERT INTO reviews (trip_id, rider_id, driver_id, rating, comment)
+    VALUES (
+      '5cd6560d-b927-453f-a12f-bf363da2637b',
+      '872b698f-ae36-45d3-8201-d9872362e6d0',
+      'e1788c52-625b-459e-ac44-00b343b67b61',
+      5,
+      'Premature review attempt for trip still on the road'
+    );
+
+DATABASE ENGINE RESPONSE:
+Error Message: Reviews are only permitted for COMPLETED trips. Current status of trip 5cd6560d-b927-453f-a12f-bf363da2637b is IN_PROGRESS
+PostgreSQL SQLSTATE: 23514 (check_violation raised by enforce_review_completion trigger)
+Verdict: REJECTED AS EXPECTED (PASS)

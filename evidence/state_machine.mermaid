@@ -1,0 +1,21 @@
+stateDiagram-v2
+    [*] --> REQUESTED : Rider submits trip request\n(Fare & location recorded)
+
+    REQUESTED --> ACCEPTED : Driver accepts trip\n(Snapshots driver & vehicle)
+    REQUESTED --> CANCELLED : Rider cancels before acceptance
+
+    ACCEPTED --> IN_PROGRESS : Driver boards passenger & begins transit\n(started_at recorded)
+    ACCEPTED --> CANCELLED : Rider or driver cancels\n(cancelled_at & reason recorded)
+
+    IN_PROGRESS --> COMPLETED : Driver arrives at destination\n(completed_at recorded)
+    IN_PROGRESS --> CANCELLED : Emergency or breakdown cancellation
+
+    COMPLETED --> [*] : Terminal state\n(Payment capture & Review unlocked)
+    CANCELLED --> [*] : Terminal state\n(No further mutations allowed)
+
+    note right of COMPLETED
+      FORBIDDEN TRANSITIONS:
+      - COMPLETED -> IN_PROGRESS (Rejected by DB trigger)
+      - COMPLETED -> CANCELLED (Rejected by DB trigger)
+      - CANCELLED -> ANY (Rejected by DB trigger)
+    end note

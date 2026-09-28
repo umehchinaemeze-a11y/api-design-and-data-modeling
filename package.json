@@ -1,0 +1,27 @@
+{
+  "name": "urbanglide-api-design-data-modeling",
+  "version": "1.0.0",
+  "description": "Architectural API design and relational data model proof for UrbanGlide ride-hailing platform",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "node scripts/dev.js",
+    "build": "tsc",
+    "db:migrate": "tsx src/migrate.ts",
+    "db:seed": "tsx src/seed.ts",
+    "proof:queries": "tsx src/queries.ts",
+    "proof:explain": "tsx src/explain.ts",
+    "proof:invariants": "tsx src/test-invariants.ts",
+    "test": "tsx src/run-all-proofs.ts",
+    "test:model": "node scripts/test-model.js",
+    "test:routes": "node scripts/test-routes.js"
+  },
+  "dependencies": {
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.1",
+    "@types/pg": "^8.11.10",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

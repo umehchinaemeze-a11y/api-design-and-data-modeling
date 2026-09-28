@@ -1,0 +1,84 @@
+--- QUERY 4: Rider Completed Trip History ---
+Rider: Amara Okafor (8ba55315-af73-4f23-86f9-c0b5d90f53ed)
+SQL:
+SELECT 
+      t.id AS trip_id,
+      t.status,
+      t.fare_amount_minor,
+      t.currency,
+      t.driver_name_snapshot,
+      t.vehicle_description_snapshot,
+      t.pickup_address,
+      t.destination_address,
+      t.completed_at,
+      p.status AS payment_status
+    FROM trips t
+    LEFT JOIN payments p ON p.trip_id = t.id
+    WHERE t.rider_id = $1 
+      AND t.status = 'COMPLETED'
+    ORDER BY t.completed_at DESC
+    LIMIT 5 OFFSET 0;
+
+OUTPUT:
+[
+  {
+    "trip_id": "b6e842ee-af89-4860-8c16-6c9e89f1e0d4",
+    "status": "COMPLETED",
+    "fare_amount_minor": "360000",
+    "currency": "NGN",
+    "driver_name_snapshot": "Babatunde Alabi",
+    "vehicle_description_snapshot": "Toyota Corolla (Silver) - APP-102-XY",
+    "pickup_address": "Victoria Island, Adeola Odeku St",
+    "destination_address": "Marina Financial Center, Lagos Island",
+    "completed_at": "2026-09-25T23:07:50.624Z",
+    "payment_status": "COMPLETED"
+  },
+  {
+    "trip_id": "09c1a973-4e74-45b9-bee0-847b1a1ced67",
+    "status": "COMPLETED",
+    "fare_amount_minor": "370000",
+    "currency": "NGN",
+    "driver_name_snapshot": "Babatunde Alabi",
+    "vehicle_description_snapshot": "Toyota Corolla (Silver) - APP-102-XY",
+    "pickup_address": "Victoria Island, Adeola Odeku St",
+    "destination_address": "Marina Financial Center, Lagos Island",
+    "completed_at": "2026-09-24T13:07:50.688Z",
+    "payment_status": "COMPLETED"
+  },
+  {
+    "trip_id": "2358cb8d-f361-4e3b-a996-8ea4eb806000",
+    "status": "COMPLETED",
+    "fare_amount_minor": "380000",
+    "currency": "NGN",
+    "driver_name_snapshot": "Babatunde Alabi",
+    "vehicle_description_snapshot": "Toyota Corolla (Silver) - APP-102-XY",
+    "pickup_address": "Victoria Island, Adeola Odeku St",
+    "destination_address": "Marina Financial Center, Lagos Island",
+    "completed_at": "2026-09-23T03:07:50.753Z",
+    "payment_status": "COMPLETED"
+  },
+  {
+    "trip_id": "1aa3ecc3-6266-47e7-bf74-552d5903f928",
+    "status": "COMPLETED",
+    "fare_amount_minor": "390000",
+    "currency": "NGN",
+    "driver_name_snapshot": "Babatunde Alabi",
+    "vehicle_description_snapshot": "Toyota Corolla (Silver) - APP-102-XY",
+    "pickup_address": "Victoria Island, Adeola Odeku St",
+    "destination_address": "Marina Financial Center, Lagos Island",
+    "completed_at": "2026-09-21T17:07:50.811Z",
+    "payment_status": "COMPLETED"
+  },
+  {
+    "trip_id": "26757d7f-24f2-4909-9f62-e691b251f653",
+    "status": "COMPLETED",
+    "fare_amount_minor": "400000",
+    "currency": "NGN",
+    "driver_name_snapshot": "Babatunde Alabi",
+    "vehicle_description_snapshot": "Toyota Corolla (Silver) - APP-102-XY",
+    "pickup_address": "Victoria Island, Adeola Odeku St",
+    "destination_address": "Marina Financial Center, Lagos Island",
+    "completed_at": "2026-09-20T07:07:50.856Z",
+    "payment_status": "COMPLETED"
+  }
+]
