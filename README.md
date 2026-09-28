@@ -1288,3 +1288,5 @@ WHERE status IN ('REQUESTED', 'ACCEPTED', 'IN_PROGRESS');
 
 **Key Engineering Lesson:**  
 Good API design starts before the API exists. Enforce your business invariants at the database layer first, and your application code will never have to apologize for dirty state.
+#   a p i - d e s i g n - a n d - d a t a - m o d e l i n g  
+ 
