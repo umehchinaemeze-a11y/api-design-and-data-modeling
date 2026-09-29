@@ -1,7 +1,28 @@
 --- MIGRATION RUN LOG ---
-Timestamp: 2026-09-28T07:35:25.236Z
+Timestamp: 2026-09-29T17:06:19.511Z
+Migration: migrations/001_initial_schema.sql
 Target: PostgreSQL 16 on port 15436
 Database: urbanglide_db
 
 STATUS: SUCCESS
-All tables (riders, drivers, vehicles, trips, payments, reviews), enums, triggers, check constraints, and partial indexes created without error.
+
+Tables created (6):
+  - drivers
+  - payments
+  - reviews
+  - riders
+  - trips
+  - vehicles
+
+Partial / performance indexes created (7):
+  - idx_reviews_driver_created
+  - idx_trips_driver_available_queue
+  - idx_trips_driver_id
+  - idx_trips_rider_completed
+  - idx_trips_single_active_driver
+  - idx_trips_single_active_rider
+  - idx_vehicles_driver_single_active
+
+Lifecycle triggers created (2):
+  - trg_enforce_review_completion
+  - trg_enforce_trip_status_transition

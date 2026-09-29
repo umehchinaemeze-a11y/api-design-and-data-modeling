@@ -1,5 +1,5 @@
 --- QUERY 1: Rider Active Trip Lookup ---
-Rider: Amara Okafor (8ba55315-af73-4f23-86f9-c0b5d90f53ed)
+Rider: Amara Okafor (11111111-1111-4111-a111-000000000001)
 SQL:
 SELECT 
       t.id AS trip_id,
@@ -21,7 +21,7 @@ SELECT
 OUTPUT:
 [
   {
-    "trip_id": "2faa45a6-8496-475f-a795-35ee51d1c037",
+    "trip_id": "44444444-4444-4444-a444-000000000221",
     "status": "ACCEPTED",
     "driver_name_snapshot": "Ibrahim Musa",
     "vehicle_description_snapshot": "Hyundai Elantra (Black) - RBC-394-CD",
@@ -29,8 +29,8 @@ OUTPUT:
     "destination_address": "Twinwaters Lagos, Okunde Bluewater Zone",
     "fare_amount_minor": "350000",
     "currency": "NGN",
-    "requested_at": "2026-09-28T08:17:52.005Z",
-    "accepted_at": "2026-09-28T08:19:52.005Z",
+    "requested_at": "2026-09-28T07:50:00.000Z",
+    "accepted_at": "2026-09-28T07:52:00.000Z",
     "started_at": null
   }
 ]

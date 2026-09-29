@@ -1,8 +1,25 @@
 const http = require('http');
 const { Client } = require('pg');
+const { TARGET } = require('./lib/target');
+
+/*
+ * UrbanGlide REST API proof server.
+ *
+ * This speaks the canonical schema in migrations/001_initial_schema.sql against the
+ * canonical database in README section 27. Two consequences worth stating:
+ *
+ *  1. The trip lifecycle is enforced by trg_enforce_trip_status_transition, which
+ *     raises SQLSTATE 23514. This server therefore maps 23514 on a trips UPDATE to
+ *     409 INVALID_STATE_TRANSITION rather than filtering on a custom P0001.
+ *  2. The canonical schema has no stamping trigger and no payment trigger, so this
+ *     server writes accepted_at / started_at / completed_at / cancelled_at itself
+ *     (chk_trips_timestamps requires them) and checks payment eligibility before
+ *     inserting. The rule that a payment is only captured for a COMPLETED trip is
+ *     the one lifecycle rule NOT enforced by a database trigger in this schema.
+ */
 
 const PORT = process.env.PORT || 3000;
-const DB_URL = process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:15436/rideflow?sslmode=disable';
+const DB_URL = TARGET.connectionString;
 
 function sendJson(res, statusCode, data) {
     res.writeHead(statusCode, { 'Content-Type': 'application/json' });
@@ -41,6 +58,21 @@ function parseBody(req) {
     });
 }
 
+/* Every 23514 raised against a trips UPDATE originates from the lifecycle
+ * trigger or from the two structural trip CHECK constraints, so a single
+ * mapping is correct for the accept / start / complete / cancel routes.
+ * Per the error contract in README section 20, a state-machine conflict is
+ * 409 Conflict, not 422. */
+function sendTripViolation(res, dbErr) {
+    if (dbErr.code === '23514') {
+        return sendError(res, 409, 'INVALID_STATE_TRANSITION', dbErr.message);
+    }
+    if (dbErr.code === '23505' && dbErr.constraint === 'idx_trips_single_active_driver') {
+        return sendError(res, 409, 'DRIVER_ALREADY_ON_TRIP', 'That driver is already assigned to an active trip.');
+    }
+    throw dbErr;
+}
+
 const server = http.createServer(async (req, res) => {
     const fullUrl = new URL(req.url, `http://${req.headers.host || 'localhost:3000'}`);
     const pathname = fullUrl.pathname;
@@ -54,7 +86,7 @@ const server = http.createServer(async (req, res) => {
         // 1. HEALTH / SYSTEM STATUS / API INDEX
         if (method === 'GET' && (pathname === '/' || pathname === '/api/v1' || pathname === '/api/v1/' || pathname === '/api/v1/health')) {
             const countsRes = await client.query(`
-                SELECT 
+                SELECT
                     (SELECT count(*) FROM riders) AS riders_count,
                     (SELECT count(*) FROM drivers) AS drivers_count,
                     (SELECT count(*) FROM vehicles) AS vehicles_count,
@@ -63,12 +95,13 @@ const server = http.createServer(async (req, res) => {
                     (SELECT count(*) FROM reviews) AS reviews_count;
             `);
             return sendJson(res, 200, {
-                service: 'RideFlow REST API Proof Server',
+                service: 'UrbanGlide REST API Proof Server',
                 version: 'v1',
                 status: 'healthy',
                 database: 'PostgreSQL 16 (Connected)',
                 counts: countsRes.rows[0],
                 endpoints: [
+                    'GET  /api/v1/riders',
                     'GET  /api/v1/trips',
                     'GET  /api/v1/trips/:id',
                     'GET  /api/v1/riders/:id/active-trip',
@@ -78,7 +111,7 @@ const server = http.createServer(async (req, res) => {
                     'POST /api/v1/trips/:id/complete',
                     'POST /api/v1/trips/:id/cancel',
                     'POST /api/v1/trips/:id/payment',
-                    'POST /api/v1/trips/:id/review'
+                    'POST /api/v1/trips/:id/reviews'
                 ]
             });
         }
@@ -92,7 +125,7 @@ const server = http.createServer(async (req, res) => {
             let sql = 'SELECT * FROM trips';
             const params = [];
             if (status) {
-                params.push(status);
+                params.push(String(status).toUpperCase());
                 sql += ' WHERE status = $1';
             }
             params.push(limit, offset);
@@ -120,7 +153,7 @@ const server = http.createServer(async (req, res) => {
             });
         }
 
-        // 3b. GET ACTIVE TRIP FOR RIDER (Query 3)
+        // 3b. GET ACTIVE TRIP FOR RIDER
         const activeTripMatch = pathname.match(/^\/api\/v1\/riders\/([0-9a-fA-F-]+)\/active-trip$/);
         if (method === 'GET' && activeTripMatch) {
             const riderId = activeTripMatch[1];
@@ -133,7 +166,9 @@ const server = http.createServer(async (req, res) => {
                 LEFT JOIN drivers d ON t.driver_id = d.id
                 LEFT JOIN vehicles v ON t.vehicle_id = v.id
                 WHERE t.rider_id = $1
-                  AND t.status IN ('requested', 'accepted', 'in_progress');
+                  AND t.status IN ('REQUESTED', 'ACCEPTED', 'IN_PROGRESS')
+                ORDER BY t.requested_at DESC
+                LIMIT 1;
             `;
             const result = await client.query(sql, [riderId]);
             if (result.rows.length === 0) {
@@ -168,17 +203,17 @@ const server = http.createServer(async (req, res) => {
                         rider_id, pickup_address, destination_address,
                         pickup_latitude, pickup_longitude, destination_latitude, destination_longitude,
                         fare_amount_minor, currency, status
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'requested')
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'REQUESTED')
                     RETURNING *;
                 `, [
                     riderId, pickupAddress, destinationAddress,
-                    pickupLatitude || 37.77, pickupLongitude || -122.41,
-                    destinationLatitude || 37.78, destinationLongitude || -122.40,
-                    fareAmountMinor, currency || 'USD'
+                    pickupLatitude || 6.4281, pickupLongitude || 3.4219,
+                    destinationLatitude || 6.4500, destinationLongitude || 3.4000,
+                    fareAmountMinor, currency || 'NGN'
                 ]);
                 return sendJson(res, 201, { trip: insertRes.rows[0] });
             } catch (dbErr) {
-                if (dbErr.code === '23505' && dbErr.constraint === 'idx_trips_rider_active') {
+                if (dbErr.code === '23505' && dbErr.constraint === 'idx_trips_single_active_rider') {
                     return sendError(res, 409, 'TRIP_ALREADY_ACTIVE', 'The rider already has an active trip in progress.', {
                         riderId
                     });
@@ -199,9 +234,18 @@ const server = http.createServer(async (req, res) => {
             }
 
             try {
+                // driver_name_snapshot / vehicle_description_snapshot are deliberate
+                // historical copies: the live driver record may be edited or soft deleted later.
                 const updateRes = await client.query(`
                     UPDATE trips
-                    SET status = 'accepted', driver_id = $1, vehicle_id = $2
+                    SET status = 'ACCEPTED',
+                        driver_id = $1,
+                        vehicle_id = $2,
+                        accepted_at = NOW(),
+                        driver_name_snapshot = (SELECT name FROM drivers WHERE id = $1),
+                        vehicle_description_snapshot = (
+                            SELECT make || ' ' || model FROM vehicles WHERE id = $2
+                        )
                     WHERE id = $3
                     RETURNING *;
                 `, [driverId, vehicleId, tripId]);
@@ -211,8 +255,11 @@ const server = http.createServer(async (req, res) => {
                 }
                 return sendJson(res, 200, { trip: updateRes.rows[0] });
             } catch (dbErr) {
-                if (dbErr.code === 'P0001') {
-                    return sendError(res, 422, 'INVALID_STATE_TRANSITION', dbErr.message);
+                if (dbErr.code === '23503') {
+                    return sendError(res, 404, 'DRIVER_OR_VEHICLE_NOT_FOUND', 'The supplied driver or vehicle does not exist.');
+                }
+                if (dbErr.code === '23514' || dbErr.code === '23505') {
+                    return sendTripViolation(res, dbErr);
                 }
                 throw dbErr;
             }
@@ -225,7 +272,8 @@ const server = http.createServer(async (req, res) => {
             try {
                 const updateRes = await client.query(`
                     UPDATE trips
-                    SET status = 'completed'
+                    SET status = 'COMPLETED',
+                        completed_at = NOW()
                     WHERE id = $1
                     RETURNING *;
                 `, [tripId]);
@@ -235,15 +283,17 @@ const server = http.createServer(async (req, res) => {
                 }
                 return sendJson(res, 200, { trip: updateRes.rows[0] });
             } catch (dbErr) {
-                if (dbErr.code === 'P0001') {
-                    return sendError(res, 422, 'INVALID_STATE_TRANSITION', dbErr.message);
+                if (dbErr.code === '23514' || dbErr.code === '23505') {
+                    return sendTripViolation(res, dbErr);
                 }
                 throw dbErr;
             }
         }
 
-        // 8. SUBMIT REVIEW (POST /api/v1/trips/:id/review)
-        const reviewMatch = pathname.match(/^\/api\/v1\/trips\/([0-9a-fA-F-]+)\/review$/);
+        // 8. SUBMIT REVIEW (POST /api/v1/trips/:id/reviews)
+        // Path is the plural collection sub-resource, matching the contract in
+        // README section 19 (Endpoint 5).
+        const reviewMatch = pathname.match(/^\/api\/v1\/trips\/([0-9a-fA-F-]+)\/reviews$/);
         if (method === 'POST' && reviewMatch) {
             const tripId = reviewMatch[1];
             const body = await parseBody(req);
@@ -254,21 +304,35 @@ const server = http.createServer(async (req, res) => {
             }
 
             try {
+                // reviews carries denormalised rider_id / driver_id so a review is read
+                // without joining trips; trg_enforce_review_completion asserts both match.
                 const insertRes = await client.query(`
-                    INSERT INTO reviews (trip_id, rating, comment)
-                    VALUES ($1, $2, $3)
+                    INSERT INTO reviews (trip_id, rider_id, driver_id, rating, comment)
+                    SELECT t.id, t.rider_id, t.driver_id, $2, $3
+                    FROM trips t
+                    WHERE t.id = $1
                     RETURNING *;
                 `, [tripId, rating, comment || null]);
+
+                if (insertRes.rows.length === 0) {
+                    return sendError(res, 404, 'TRIP_NOT_FOUND', `Trip with id ${tripId} not found.`);
+                }
                 return sendJson(res, 201, { review: insertRes.rows[0] });
             } catch (dbErr) {
-                if (dbErr.code === 'P0001') {
-                    return sendError(res, 422, 'TRIP_NOT_COMPLETED', dbErr.message);
+                if (dbErr.code === '23503') {
+                    return sendError(res, 404, 'TRIP_NOT_FOUND', `Trip with id ${tripId} not found.`);
                 }
-                if (dbErr.code === '23505') {
+                if (dbErr.code === '23505' && dbErr.constraint === 'reviews_trip_id_key') {
                     return sendError(res, 409, 'REVIEW_ALREADY_EXISTS', 'A review has already been submitted for this trip.');
                 }
                 if (dbErr.code === '23514') {
-                    return sendError(res, 400, 'INVALID_RATING', 'Rating must be an integer between 1 and 5.');
+                    if (dbErr.constraint === 'reviews_rating_check') {
+                        return sendError(res, 400, 'INVALID_RATING', 'Rating must be an integer between 1 and 5.');
+                    }
+                    if (/only permitted for COMPLETED trips/.test(dbErr.message)) {
+                        return sendError(res, 409, 'TRIP_NOT_COMPLETED', dbErr.message);
+                    }
+                    return sendError(res, 403, 'REVIEW_PARTICIPANT_MISMATCH', dbErr.message);
                 }
                 throw dbErr;
             }
@@ -280,12 +344,14 @@ const server = http.createServer(async (req, res) => {
             const tripId = startMatch[1];
 
             try {
-                // No status precondition in the WHERE clause: trg_validate_trip_status_transition
-                // permits only accepted -> in_progress and stamps started_at, so the database
-                // remains the single authority on the lifecycle state machine.
+                // No status precondition in the WHERE clause: trg_enforce_trip_status_transition
+                // permits only ACCEPTED -> IN_PROGRESS, so the database remains the single
+                // authority on the lifecycle state machine. started_at is written here
+                // because chk_trips_timestamps requires it for IN_PROGRESS.
                 const updateRes = await client.query(`
                     UPDATE trips
-                    SET status = 'in_progress'
+                    SET status = 'IN_PROGRESS',
+                        started_at = NOW()
                     WHERE id = $1
                     RETURNING *;
                 `, [tripId]);
@@ -295,8 +361,8 @@ const server = http.createServer(async (req, res) => {
                 }
                 return sendJson(res, 200, { trip: updateRes.rows[0] });
             } catch (dbErr) {
-                if (dbErr.code === 'P0001') {
-                    return sendError(res, 422, 'INVALID_STATE_TRANSITION', dbErr.message);
+                if (dbErr.code === '23514' || dbErr.code === '23505') {
+                    return sendTripViolation(res, dbErr);
                 }
                 throw dbErr;
             }
@@ -314,27 +380,29 @@ const server = http.createServer(async (req, res) => {
             }
 
             try {
-                // Cancellation is legal only from requested / accepted / in_progress per
-                // trg_validate_trip_status_transition; completed and cancelled are terminal.
+                // Cancellation is legal only from REQUESTED / ACCEPTED / IN_PROGRESS per
+                // trg_enforce_trip_status_transition; COMPLETED and CANCELLED are terminal.
+                // Re-cancelling is a no-op because the trigger short-circuits on an
+                // unchanged status.
                 const updateRes = await client.query(`
                     UPDATE trips
-                    SET status = 'cancelled'
+                    SET status = 'CANCELLED',
+                        cancelled_at = NOW(),
+                        cancellation_reason = $2
                     WHERE id = $1
                     RETURNING *;
-                `, [tripId]);
+                `, [tripId, reason || null]);
 
                 if (updateRes.rows.length === 0) {
                     return sendError(res, 404, 'TRIP_NOT_FOUND', `Trip with id ${tripId} not found.`);
                 }
                 return sendJson(res, 200, { trip: updateRes.rows[0] });
             } catch (dbErr) {
-                if (dbErr.code === 'P0001') {
-                    const statusRes = await client.query('SELECT status FROM trips WHERE id = $1', [tripId]);
-                    const currentStatus = statusRes.rows.length ? statusRes.rows[0].status : null;
-                    if (currentStatus === 'completed') {
-                        return sendError(res, 422, 'TRIP_ALREADY_COMPLETED', 'A completed trip cannot be cancelled.');
+                if (dbErr.code === '23514' || dbErr.code === '23505') {
+                    if (/COMPLETED trips cannot transition/.test(dbErr.message || '')) {
+                        return sendError(res, 409, 'TRIP_ALREADY_COMPLETED', 'A completed trip cannot be cancelled.');
                     }
-                    return sendError(res, 422, 'INVALID_STATE_TRANSITION', dbErr.message);
+                    return sendTripViolation(res, dbErr);
                 }
                 throw dbErr;
             }
@@ -348,50 +416,48 @@ const server = http.createServer(async (req, res) => {
             const { amountMinor, currency, providerReference } = body;
 
             if (!Number.isInteger(amountMinor) || amountMinor <= 0) {
-                return sendError(res, 400, 'INVALID_AMOUNT', 'amountMinor must be a positive integer expressed in minor units (e.g. cents).');
+                return sendError(res, 400, 'INVALID_AMOUNT', 'amountMinor must be a positive integer expressed in minor units (e.g. kobo, cents).');
             }
 
+            // provider_reference is NOT NULL UNIQUE in the canonical schema, so an
+            // omitted reference is synthesised deterministically from the trip and amount.
+            const reference = providerReference
+                || `auto_${tripId.replace(/-/g, '').slice(0, 16)}_${amountMinor}`;
+
             try {
-                // Insert at the default 'pending' status, then settle it. The pending -> succeeded
-                // move goes through trg_validate_payment_status_transition, which stamps paid_at.
-                // Settled payments are immutable and UNIQUE(trip_id) allows exactly one per trip.
-                await client.query('BEGIN');
+                // Eligibility first. payments.status is payment_status_enum, so a settled
+                // capture is written directly as COMPLETED with paid_at set; the canonical
+                // schema has no payment trigger, so the COMPLETED-trip precondition is
+                // evaluated here.
+                const tripRes = await client.query('SELECT status FROM trips WHERE id = $1', [tripId]);
+                if (tripRes.rows.length === 0) {
+                    return sendError(res, 404, 'TRIP_NOT_FOUND', `Trip with id ${tripId} not found.`);
+                }
+                if (tripRes.rows[0].status !== 'COMPLETED') {
+                    return sendError(res, 409, 'TRIP_NOT_COMPLETED',
+                        `Cannot capture payment for trip ${tripId}: trip status is ${tripRes.rows[0].status}, not COMPLETED.`,
+                        { tripId });
+                }
 
                 const insertRes = await client.query(`
-                    INSERT INTO payments (trip_id, amount_minor, currency, provider_reference)
-                    VALUES ($1, $2, $3, $4)
-                    RETURNING id;
-                `, [tripId, amountMinor, currency || 'USD', providerReference || null]);
-
-                const settledRes = await client.query(`
-                    UPDATE payments
-                    SET status = 'succeeded'
-                    WHERE id = $1
+                    INSERT INTO payments (trip_id, amount_minor, currency, status, provider_reference, paid_at)
+                    VALUES ($1, $2, $3, 'COMPLETED', $4, NOW())
                     RETURNING *;
-                `, [insertRes.rows[0].id]);
+                `, [tripId, amountMinor, currency || 'NGN', reference]);
 
-                await client.query('COMMIT');
-                return sendJson(res, 201, { payment: settledRes.rows[0] });
+                return sendJson(res, 201, { payment: insertRes.rows[0] });
             } catch (dbErr) {
-                await client.query('ROLLBACK');
-
                 if (dbErr.code === '23503') {
                     return sendError(res, 404, 'TRIP_NOT_FOUND', `Trip with id ${tripId} not found.`);
                 }
                 if (dbErr.code === '23505' && dbErr.constraint === 'payments_trip_id_key') {
                     return sendError(res, 409, 'PAYMENT_ALREADY_EXISTS', 'A payment already exists for this trip.', { tripId });
                 }
-                if (dbErr.code === '23505') {
-                    return sendError(res, 409, 'DUPLICATE_PROVIDER_REFERENCE', 'That provider reference is already recorded against another payment.', { providerReference: providerReference || null });
+                if (dbErr.code === '23505' && dbErr.constraint === 'payments_provider_reference_key') {
+                    return sendError(res, 409, 'DUPLICATE_PROVIDER_REFERENCE', 'That provider reference is already recorded against another payment.', { providerReference: reference });
                 }
                 if (dbErr.code === '23514') {
-                    return sendError(res, 400, 'INVALID_PAYMENT', 'Payment rejected by database validation (amount must be positive, currency must be 3 characters).');
-                }
-                if (dbErr.code === 'P0001') {
-                    if (String(dbErr.message).startsWith('Cannot capture payment')) {
-                        return sendError(res, 422, 'TRIP_NOT_COMPLETED', dbErr.message, { tripId });
-                    }
-                    return sendError(res, 422, 'INVALID_STATE_TRANSITION', dbErr.message);
+                    return sendError(res, 400, 'INVALID_PAYMENT', 'Payment rejected by database validation (amount_minor must be positive, currency must be 3 characters).');
                 }
                 throw dbErr;
             }
@@ -422,7 +488,7 @@ server.on('error', (err) => {
 
 server.listen(PORT, () => {
     console.log(`================================================================`);
-    console.log(`  RideFlow API Server running at http://localhost:${PORT}/api/v1`);
+    console.log(`  UrbanGlide API Server running at http://localhost:${PORT}/api/v1`);
     console.log(`================================================================`);
     console.log(`  Health Check & Counts: GET http://localhost:${PORT}/api/v1/health`);
     console.log(`  List Riders          : GET http://localhost:${PORT}/api/v1/riders`);

@@ -8,10 +8,22 @@
 -- Clean slate execution for idempotent setup
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
--- Drop existing triggers and functions if existing
-DROP TRIGGER IF EXISTS trg_enforce_trip_status_transition ON trips;
+-- Drop existing triggers and functions if existing.
+-- IF EXISTS only suppresses a missing *trigger*; it still errors when the
+-- target relation does not exist at all, which is the case on a brand new
+-- database. Guard on to_regclass so this migration runs on an empty instance.
+DO $$
+BEGIN
+  IF to_regclass('public.trips') IS NOT NULL THEN
+    DROP TRIGGER IF EXISTS trg_enforce_trip_status_transition ON trips;
+  END IF;
+  IF to_regclass('public.reviews') IS NOT NULL THEN
+    DROP TRIGGER IF EXISTS trg_enforce_review_completion ON reviews;
+  END IF;
+END;
+$$;
+
 DROP FUNCTION IF EXISTS enforce_trip_status_transition();
-DROP TRIGGER IF EXISTS trg_enforce_review_completion ON reviews;
 DROP FUNCTION IF EXISTS enforce_review_completion();
 
 -- Drop existing tables in reverse dependency order

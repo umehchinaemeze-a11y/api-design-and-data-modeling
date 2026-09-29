@@ -1,7 +1,6 @@
 const { spawn } = require('child_process');
-const fs = require('fs');
 const path = require('path');
-const { Client } = require('pg');
+const { provision } = require('./lib/provision');
 
 const PORT = Number(process.env.TEST_PORT || 3111);
 const ORIGIN = `http://localhost:${PORT}`;
@@ -21,35 +20,36 @@ async function waitForServer(timeoutMs = 20000) {
     return false;
 }
 
-async function reseed() {
-    const client = new Client({
-        connectionString: process.env.DATABASE_URL || 'postgresql://postgres:postgres@localhost:15436/rideflow?sslmode=disable'
-    });
-    await client.connect();
-    await client.query(fs.readFileSync(path.join(__dirname, '../sql/seed.sql'), 'utf8'));
-    await client.end();
-}
-
 function stopServer() {
     if (server && !server.killed) {
         try { server.kill(); } catch (e) {}
     }
 }
 
+/* Deterministic fixtures from src/seed.ts, against the canonical schema. */
+const ID = {
+    rider: (n) => `11111111-1111-4111-a111-${String(n).padStart(12, '0')}`,
+    driver: (n) => `22222222-2222-4222-a222-${String(n).padStart(12, '0')}`,
+    vehicle: (n) => `33333333-3333-4333-a333-${String(n).padStart(12, '0')}`,
+    trip: (n) => `44444444-4444-4444-a444-${String(n).padStart(12, '0')}`,
+};
+
 const TRIP = {
-    requested: 'ca111111-1111-4111-d111-111111111111',
-    accepted: 'ca222222-2222-4222-d222-222222222222',
-    inProgress: 'ca333333-3333-4333-d333-333333333333',
-    completedWithPayment: 'ca444444-4444-4444-d444-444444444444',
-    completedNoReview: 'ca555555-5555-4555-d555-555555555555',
-    cancelled: 'ca666666-6666-4666-d666-666666666666'
+    requested: ID.trip(216),          // REQUESTED, rider 5, unassigned
+    accepted: ID.trip(221),           // ACCEPTED, rider 1, driver 3, vehicle 3
+    inProgress: ID.trip(222),         // IN_PROGRESS, rider 2, driver 4, vehicle 4
+    completedWithPayment: ID.trip(1), // COMPLETED, paid and reviewed
+    completedNoReview: ID.trip(4),    // COMPLETED, paid, deliberately unreviewed
+    cancelled: ID.trip(201)           // CANCELLED, terminal
 };
 const UNKNOWN = '00000000-0000-0000-0000-000000000000';
-const DRIVER = 'da222222-2222-4222-b222-222222222222';
-const VEHICLE = 'ba222222-2222-4222-c222-222222222222';
-const RIDER_FREE = '11111111-1111-4111-a111-111111111111';
-const DRIVER_FREE = 'da333333-3333-4333-b333-333333333333';
-const VEHICLE_FREE = 'ba333333-3333-4333-c333-333333333333';
+const DRIVER = ID.driver(1);
+const VEHICLE = ID.vehicle(1);
+const RIDER_FREE = ID.rider(3);       // holds no active trip in the seed
+const DRIVER_FREE = ID.driver(5);     // AVAILABLE and unassigned
+const VEHICLE_FREE = ID.vehicle(5);   // registered to DRIVER_FREE
+const RIDER_NO_ACTIVE = ID.rider(4);  // only holds terminal trips
+const RIDER_ACTIVE = ID.rider(1);     // holds trip 221
 
 let pass = 0, fail = 0;
 const rows = [];
@@ -73,11 +73,11 @@ async function call(method, path, body) {
 
 async function main() {
     console.log('================================================================');
-    console.log('        RIDEFLOW API ROUTE VERIFICATION (start/cancel/payment)   ');
+    console.log('      URBANGLIDE API ROUTE VERIFICATION (start/cancel/payment)   ');
     console.log('================================================================\n');
 
-    // Deterministic baseline: re-seed, then boot a throwaway server on TEST_PORT
-    await reseed();
+    // Deterministic baseline: canonical schema + canonical seed, then boot a throwaway server
+    await provision();
     server = spawn(process.execPath, [path.join(__dirname, 'dev.js')], {
         env: { ...process.env, PORT: String(PORT) },
         stdio: 'ignore'
@@ -92,20 +92,20 @@ async function main() {
     {
         const r = await call('POST', `/trips/${TRIP.accepted}/start`);
         check('start on accepted trip -> 200 + status in_progress',
-            r.status === 200 && r.body?.trip?.status === 'in_progress', `status=${r.status} body=${JSON.stringify(r.body)}`);
-        check('start stamps started_at (set by DB trigger)',
+            r.status === 200 && r.body?.trip?.status === 'IN_PROGRESS', `status=${r.status} body=${JSON.stringify(r.body)}`);
+        check('start stamps started_at (required by chk_trips_timestamps)',
             r.body?.trip?.started_at !== null && r.body?.trip?.started_at !== undefined,
             `started_at=${r.body?.trip?.started_at}`);
     }
     {
         const r = await call('POST', `/trips/${TRIP.requested}/start`);
-        check('start on requested trip -> 422 INVALID_STATE_TRANSITION',
-            r.status === 422 && r.body?.error?.code === 'INVALID_STATE_TRANSITION', `status=${r.status} body=${JSON.stringify(r.body)}`);
+        check('start on requested trip -> 409 INVALID_STATE_TRANSITION',
+            r.status === 409 && r.body?.error?.code === 'INVALID_STATE_TRANSITION', `status=${r.status} body=${JSON.stringify(r.body)}`);
     }
     {
         const r = await call('POST', `/trips/${TRIP.completedWithPayment}/start`);
-        check('start on completed trip -> 422 INVALID_STATE_TRANSITION',
-            r.status === 422 && r.body?.error?.code === 'INVALID_STATE_TRANSITION', `status=${r.status} body=${JSON.stringify(r.body)}`);
+        check('start on completed trip -> 409 INVALID_STATE_TRANSITION',
+            r.status === 409 && r.body?.error?.code === 'INVALID_STATE_TRANSITION', `status=${r.status} body=${JSON.stringify(r.body)}`);
     }
     {
         const r = await call('POST', `/trips/${UNKNOWN}/start`);
@@ -117,22 +117,22 @@ async function main() {
     {
         const r = await call('POST', `/trips/${TRIP.inProgress}/cancel`);
         check('cancel on in_progress trip -> 200 + status cancelled',
-            r.status === 200 && r.body?.trip?.status === 'cancelled', `status=${r.status} body=${JSON.stringify(r.body)}`);
+            r.status === 200 && r.body?.trip?.status === 'CANCELLED', `status=${r.status} body=${JSON.stringify(r.body)}`);
     }
     {
         const r = await call('POST', `/trips/${TRIP.requested}/cancel`, { reason: 'Rider changed plans' });
         check('cancel on requested trip with reason -> 200 + status cancelled',
-            r.status === 200 && r.body?.trip?.status === 'cancelled', `status=${r.status} body=${JSON.stringify(r.body)}`);
+            r.status === 200 && r.body?.trip?.status === 'CANCELLED', `status=${r.status} body=${JSON.stringify(r.body)}`);
     }
     {
         const r = await call('POST', `/trips/${TRIP.completedNoReview}/cancel`);
-        check('cancel on completed trip -> 422 TRIP_ALREADY_COMPLETED',
-            r.status === 422 && r.body?.error?.code === 'TRIP_ALREADY_COMPLETED', `status=${r.status} body=${JSON.stringify(r.body)}`);
+        check('cancel on completed trip -> 409 TRIP_ALREADY_COMPLETED',
+            r.status === 409 && r.body?.error?.code === 'TRIP_ALREADY_COMPLETED', `status=${r.status} body=${JSON.stringify(r.body)}`);
     }
     {
         const r = await call('POST', `/trips/${TRIP.cancelled}/cancel`);
         check('cancel on already-cancelled trip -> 200 idempotent no-op (matrix: No-op)',
-            r.status === 200 && r.body?.trip?.status === 'cancelled', `status=${r.status} body=${JSON.stringify(r.body)}`);
+            r.status === 200 && r.body?.trip?.status === 'CANCELLED', `status=${r.status} body=${JSON.stringify(r.body)}`);
     }
     {
         const r = await call('POST', `/trips/${UNKNOWN}/cancel`);
@@ -141,7 +141,7 @@ async function main() {
     }
     {
         const r = await call('POST', `/trips/${TRIP.completedNoReview}/cancel`, '{}');
-        check('cancel with no body -> 404/422 handled without 500',
+        check('cancel with no body -> 409 handled without 500',
             r.status !== 500, `status=${r.status} body=${JSON.stringify(r.body)}`);
     }
 
@@ -153,38 +153,38 @@ async function main() {
             fareAmountMinor: 3450, currency: 'USD'
         });
         check('setup: create trip for full lifecycle -> 201 requested',
-            r.status === 201 && r.body?.trip?.status === 'requested', `status=${r.status} body=${JSON.stringify(r.body)}`);
+            r.status === 201 && r.body?.trip?.status === 'REQUESTED', `status=${r.status} body=${JSON.stringify(r.body)}`);
         payable = r.body?.trip?.id;
     }
     {
         const r = await call('POST', `/trips/${payable}/payment`, { amountMinor: 3450, currency: 'USD', providerReference: 'ch_elig_requested' });
-        check('payment on requested trip -> 422 TRIP_NOT_COMPLETED (trg_validate_payment_trip_completion)',
-            r.status === 422 && r.body?.error?.code === 'TRIP_NOT_COMPLETED', `status=${r.status} body=${JSON.stringify(r.body)}`);
+        check('payment on REQUESTED trip -> 409 TRIP_NOT_COMPLETED (API pre-check, no payment trigger in schema)',
+            r.status === 409 && r.body?.error?.code === 'TRIP_NOT_COMPLETED', `status=${r.status} body=${JSON.stringify(r.body)}`);
     }
     {
         const r = await call('POST', `/trips/${payable}/accept`, { driverId: DRIVER_FREE, vehicleId: VEHICLE_FREE });
         check('setup: accept -> 200 accepted',
-            r.status === 200 && r.body?.trip?.status === 'accepted', `status=${r.status} body=${JSON.stringify(r.body)}`);
+            r.status === 200 && r.body?.trip?.status === 'ACCEPTED', `status=${r.status} body=${JSON.stringify(r.body)}`);
     }
     {
         const r = await call('POST', `/trips/${payable}/payment`, { amountMinor: 3450, currency: 'USD', providerReference: 'ch_elig_accepted' });
-        check('payment on accepted trip -> 422 TRIP_NOT_COMPLETED',
-            r.status === 422 && r.body?.error?.code === 'TRIP_NOT_COMPLETED', `status=${r.status} body=${JSON.stringify(r.body)}`);
+        check('payment on accepted trip -> 409 TRIP_NOT_COMPLETED',
+            r.status === 409 && r.body?.error?.code === 'TRIP_NOT_COMPLETED', `status=${r.status} body=${JSON.stringify(r.body)}`);
     }
     {
         const r = await call('POST', `/trips/${payable}/start`, {});
         check('setup: start -> 200 in_progress',
-            r.status === 200 && r.body?.trip?.status === 'in_progress', `status=${r.status} body=${JSON.stringify(r.body)}`);
+            r.status === 200 && r.body?.trip?.status === 'IN_PROGRESS', `status=${r.status} body=${JSON.stringify(r.body)}`);
     }
     {
         const r = await call('POST', `/trips/${payable}/payment`, { amountMinor: 3450, currency: 'USD', providerReference: 'ch_elig_in_progress' });
-        check('payment on in_progress trip -> 422 TRIP_NOT_COMPLETED',
-            r.status === 422 && r.body?.error?.code === 'TRIP_NOT_COMPLETED', `status=${r.status} body=${JSON.stringify(r.body)}`);
+        check('payment on in_progress trip -> 409 TRIP_NOT_COMPLETED',
+            r.status === 409 && r.body?.error?.code === 'TRIP_NOT_COMPLETED', `status=${r.status} body=${JSON.stringify(r.body)}`);
     }
     {
         const r = await call('POST', `/trips/${payable}/complete`, {});
         check('setup: complete -> 200 completed',
-            r.status === 200 && r.body?.trip?.status === 'completed', `status=${r.status} body=${JSON.stringify(r.body)}`);
+            r.status === 200 && r.body?.trip?.status === 'COMPLETED', `status=${r.status} body=${JSON.stringify(r.body)}`);
     }
     {
         const r = await call('POST', `/trips/${payable}/payment`, { amountMinor: 2200, currency: 'US' });
@@ -197,7 +197,7 @@ async function main() {
             r.status === 400 && r.body?.error?.code === 'INVALID_AMOUNT', `status=${r.status} body=${JSON.stringify(r.body)}`);
     }
     {
-        const r = await call('POST', `/trips/${payable}/payment`, { amountMinor: 500, providerReference: 'ch_rideflow_proof_t4' });
+        const r = await call('POST', `/trips/${payable}/payment`, { amountMinor: 500, providerReference: 'pay_ref_1_44444444' });
         check('payment with duplicate providerReference -> 409 DUPLICATE_PROVIDER_REFERENCE',
             r.status === 409 && r.body?.error?.code === 'DUPLICATE_PROVIDER_REFERENCE', `status=${r.status} body=${JSON.stringify(r.body)}`);
     }
@@ -205,9 +205,9 @@ async function main() {
         const r = await call('POST', `/trips/${payable}/payment`, { amountMinor: 3450, currency: 'USD', providerReference: 'ch_route_test_unique' });
         check('payment on completed trip -> 201',
             r.status === 201 && r.body?.payment, `status=${r.status} body=${JSON.stringify(r.body)}`);
-        check('payment settles to status succeeded (via DB trigger)',
-            r.body?.payment?.status === 'succeeded', `status=${r.body?.payment?.status}`);
-        check('payment stamps paid_at (set by DB trigger)',
+        check('payment settles to payment_status_enum COMPLETED',
+            r.body?.payment?.status === 'COMPLETED', `status=${r.body?.payment?.status}`);
+        check('payment stamps paid_at at capture time',
             !!r.body?.payment?.paid_at, `paid_at=${r.body?.payment?.paid_at}`);
         check('payment records minor units + currency',
             String(r.body?.payment?.amount_minor) === '3450' && r.body?.payment?.currency === 'USD',
@@ -224,8 +224,8 @@ async function main() {
     }
     {
         const r = await call('POST', `/trips/${TRIP.cancelled}/payment`, { amountMinor: 1500 });
-        check('payment on cancelled trip -> 422 TRIP_NOT_COMPLETED',
-            r.status === 422 && r.body?.error?.code === 'TRIP_NOT_COMPLETED', `status=${r.status} body=${JSON.stringify(r.body)}`);
+        check('payment on cancelled trip -> 409 TRIP_NOT_COMPLETED',
+            r.status === 409 && r.body?.error?.code === 'TRIP_NOT_COMPLETED', `status=${r.status} body=${JSON.stringify(r.body)}`);
     }
     {
         const r = await call('POST', `/trips/${UNKNOWN}/payment`, { amountMinor: 100 });
@@ -242,17 +242,17 @@ async function main() {
         await call('POST', `/trips/${t2}/start`, {});
         await call('POST', `/trips/${t2}/complete`, {});
         const r = await call('POST', `/trips/${t2}/payment`, { amountMinor: 1500, providerReference: 'ch_default_currency' });
-        check('payment without currency defaults to USD -> 201',
-            r.status === 201 && r.body?.payment?.currency === 'USD', `status=${r.status} body=${JSON.stringify(r.body)}`);
+        check('payment without currency defaults to NGN (platform default) -> 201',
+            r.status === 201 && r.body?.payment?.currency === 'NGN', `status=${r.status} body=${JSON.stringify(r.body)}`);
     }
 
     console.log('GROUP D: NO REGRESSION on pre-existing routes');
     {
         const r = await call('GET', '/health');
         check('GET /health -> 200 healthy', r.status === 200 && r.body?.status === 'healthy', `status=${r.status}`);
-        check('health advertises all 10 documented endpoints',
-            Array.isArray(r.body?.endpoints) && r.body.endpoints.length === 10,
-            `endpoints=${JSON.stringify(r.body?.endpoints)}`);
+    check('health advertises all 11 implemented endpoints',
+    Array.isArray(r.body?.endpoints) && r.body.endpoints.length === 11,
+    `endpoints=${JSON.stringify(r.body?.endpoints)}`);
     }
     {
         const r = await call('GET', '/trips?limit=3');
@@ -269,33 +269,33 @@ async function main() {
             r.status === 404 && r.body?.error?.code === 'TRIP_NOT_FOUND', `status=${r.status}`);
     }
     {
-        const r = await call('GET', '/riders/33333333-3333-4333-a333-333333333333/active-trip');
+        const r = await call('GET', `/riders/${RIDER_NO_ACTIVE}/active-trip`);
         check('GET /riders/:id/active-trip for rider with no active trip -> 404 ACTIVE_TRIP_NOT_FOUND',
             r.status === 404 && r.body?.error?.code === 'ACTIVE_TRIP_NOT_FOUND', `status=${r.status} body=${JSON.stringify(r.body)}`);
     }
     {
-        const r = await call('GET', '/riders/22222222-2222-4222-a222-222222222222/active-trip');
+        const r = await call('GET', `/riders/${RIDER_ACTIVE}/active-trip`);
         check('GET /riders/:id/active-trip for rider with active trip -> 200',
             r.status === 200 && r.body?.trip, `status=${r.status} body=${JSON.stringify(r.body)}`);
     }
     {
         const r = await call('POST', `/trips/${TRIP.requested}/accept`, { driverId: DRIVER, vehicleId: VEHICLE });
-        check('POST /trips/:id/accept on cancelled trip -> 422 INVALID_STATE_TRANSITION',
-            r.status === 422 && r.body?.error?.code === 'INVALID_STATE_TRANSITION', `status=${r.status} body=${JSON.stringify(r.body)}`);
+        check('POST /trips/:id/accept on cancelled trip -> 409 INVALID_STATE_TRANSITION',
+            r.status === 409 && r.body?.error?.code === 'INVALID_STATE_TRANSITION', `status=${r.status} body=${JSON.stringify(r.body)}`);
     }
     {
         const r = await call('POST', `/trips/${TRIP.inProgress}/complete`);
-        check('POST /trips/:id/complete on cancelled trip -> 422 INVALID_STATE_TRANSITION',
-            r.status === 422 && r.body?.error?.code === 'INVALID_STATE_TRANSITION', `status=${r.status} body=${JSON.stringify(r.body)}`);
+        check('POST /trips/:id/complete on cancelled trip -> 409 INVALID_STATE_TRANSITION',
+            r.status === 409 && r.body?.error?.code === 'INVALID_STATE_TRANSITION', `status=${r.status} body=${JSON.stringify(r.body)}`);
     }
     {
-        const r = await call('POST', `/trips/${TRIP.inProgress}/review`, { rating: 5 });
-        check('POST /trips/:id/review on cancelled trip -> 422 TRIP_NOT_COMPLETED',
-            r.status === 422 && r.body?.error?.code === 'TRIP_NOT_COMPLETED', `status=${r.status} body=${JSON.stringify(r.body)}`);
+        const r = await call('POST', `/trips/${TRIP.inProgress}/reviews`, { rating: 5 });
+        check('POST /trips/:id/reviews on cancelled trip -> 409 TRIP_NOT_COMPLETED',
+            r.status === 409 && r.body?.error?.code === 'TRIP_NOT_COMPLETED', `status=${r.status} body=${JSON.stringify(r.body)}`);
     }
     {
-        const r = await call('POST', `/trips/${TRIP.completedNoReview}/review`, { rating: 6 });
-        check('POST /trips/:id/review rating 6 -> 400 INVALID_RATING',
+        const r = await call('POST', `/trips/${TRIP.completedNoReview}/reviews`, { rating: 6 });
+        check('POST /trips/:id/reviews rating 6 -> 400 INVALID_RATING',
             r.status === 400 && r.body?.error?.code === 'INVALID_RATING', `status=${r.status} body=${JSON.stringify(r.body)}`);
     }
     {

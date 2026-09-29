@@ -95,12 +95,13 @@ To preserve architectural focus and adhere to the proof-layer scope, the followi
 | :--- | :--- | :--- | :--- | :--- |
 | **FR-04** | One rider cannot have multiple active trips simultaneously | Partial Unique Index on `(rider_id)` where status is active | `trips (rider_id)` WHERE `status IN ('REQUESTED', 'ACCEPTED', 'IN_PROGRESS')` | Invalid Test #1 (Attempt duplicate active trip) |
 | **FR-05** | One driver cannot handle conflicting active trips | Partial Unique Index on `(driver_id)` where status is active | `trips (driver_id)` WHERE `status IN ('ACCEPTED', 'IN_PROGRESS')` | Database constraint schema test |
-| **FR-03** | Completed trip cannot return to in-progress or cancelled | PostgreSQL Transition Trigger raising SQLSTATE exception | `trips_status_transition_trigger` on `BEFORE UPDATE OF status` | Invalid Test #2 (Transition `COMPLETED` $\rightarrow$ `IN_PROGRESS`) |
+| **FR-03** | Completed trip cannot return to in-progress or cancelled | PostgreSQL Transition Trigger raising SQLSTATE exception | `trg_enforce_trip_status_transition` on `BEFORE UPDATE OF status` | Invalid Test #2 (Transition `COMPLETED` $\rightarrow$ `IN_PROGRESS`) |
 | **FR-06** | Historical trip fare remains immutable | Fare snapshot columns on Trip record | `trips.fare_amount_minor`, `trips.currency` | Seed verification & Query #3 inspection |
 | **FR-07** | Historical driver/vehicle identity remains stable | Denormalized snapshot strings on Trip | `trips.driver_name_snapshot`, `trips.vehicle_description_snapshot` | Query #3 inspection |
 | **FR-08** | Money must be exact without precision loss | BigInt minor units + ISO 4217 currency | `trips.fare_amount_minor BIGINT`, `payments.amount_minor BIGINT` | Schema definition & payment test |
-| **FR-09** | Reviews allowed only after trip is completed | PostgreSQL Validation Trigger checking Trip status on insert | `review_trip_completion_trigger` on `BEFORE INSERT ON reviews` | Invalid Test #3 (Review for `IN_PROGRESS` trip) |
+| **FR-09** | Reviews allowed only after trip is completed | PostgreSQL Validation Trigger checking Trip status on insert | `trg_enforce_review_completion` on `BEFORE INSERT ON reviews` | Invalid Test #3 (Review for `IN_PROGRESS` trip) |
 | **FR-10** | At most one review per trip | Unique constraint on `trip_id` | `reviews.trip_id UNIQUE` | Schema definition |
 | **NFR-01** | Unpredictable, non-sequential IDs | UUID primary keys generated via `gen_random_uuid()` | All tables: `id UUID PRIMARY KEY DEFAULT gen_random_uuid()` | Schema definition |
-| **NFR-06** | Sub-millisecond lookup for active rider trip | Tailored partial index on `(rider_id, status)` | `idx_trips_rider_active` | Query Plan #1 (EXPLAIN ANALYZE) |
-| **NFR-06** | High performance driver queue lookup | Compound index on `(status, requested_at DESC)` | `idx_trips_driver_available_queue` | Query Plan #2 (EXPLAIN ANALYZE) |
+| **NFR-06** | Sub-millisecond lookup for active rider trip | Partial unique index on `(rider_id)` restricted to active statuses | `idx_trips_single_active_rider` | Query Plan #3 (EXPLAIN ANALYZE) |
+| **NFR-06** | High performance driver queue lookup | Partial index on `(requested_at DESC)` where trip is unassigned | `idx_trips_driver_available_queue` | Query Plan #1 (EXPLAIN ANALYZE) |
+| **NFR-06** | Fast rider trip history with payment status | Partial index on `(rider_id, completed_at DESC)` where `COMPLETED` | `idx_trips_rider_completed` | Query Plan #2 (EXPLAIN ANALYZE) |

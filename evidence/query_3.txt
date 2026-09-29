@@ -1,5 +1,5 @@
 --- QUERY 3: Detailed Trip Manifest & Audit Trail ---
-Trip ID: 40467c99-6f47-4213-af21-a199c08766d7
+Trip ID: 44444444-4444-4444-a444-000000000001
 SQL:
 SELECT 
       t.id AS trip_id,
@@ -31,7 +31,7 @@ SELECT
 OUTPUT:
 [
   {
-    "trip_id": "40467c99-6f47-4213-af21-a199c08766d7",
+    "trip_id": "44444444-4444-4444-a444-000000000001",
     "status": "COMPLETED",
     "fare_amount_minor": "851000",
     "currency": "NGN",
@@ -39,17 +39,17 @@ OUTPUT:
     "vehicle_description_snapshot": "Honda Civic (Midnight Blue) - KJA-582-AA",
     "pickup_address": "Murtala Muhammed Airport T2, Ikeja",
     "destination_address": "Lekki Phase 1, Admiralty Way",
-    "requested_at": "2026-09-27T07:27:50.514Z",
-    "accepted_at": "2026-09-27T07:29:50.514Z",
-    "started_at": "2026-09-27T07:37:50.514Z",
-    "completed_at": "2026-09-27T08:07:50.514Z",
-    "payment_id": "e8e76ff7-ba4e-4639-8f04-65b333672f81",
+    "requested_at": "2026-09-27T07:00:00.000Z",
+    "accepted_at": "2026-09-27T07:02:00.000Z",
+    "started_at": "2026-09-27T07:10:00.000Z",
+    "completed_at": "2026-09-27T07:40:00.000Z",
+    "payment_id": "55555555-5555-4555-a555-000000000001",
     "payment_amount_minor": "851000",
     "payment_currency": "NGN",
     "payment_status": "COMPLETED",
-    "provider_reference": "pay_ref_1_40467c99",
-    "paid_at": "2026-09-27T08:07:50.514Z",
-    "review_id": "94f64da8-5cd3-4e77-b487-1685c0b5ebaa",
+    "provider_reference": "pay_ref_1_44444444",
+    "paid_at": "2026-09-27T07:40:00.000Z",
+    "review_id": "66666666-6666-4666-a666-000000000001",
     "review_rating": 5,
     "review_comment": "Arrived promptly, smooth drive through Lagos traffic."
   }

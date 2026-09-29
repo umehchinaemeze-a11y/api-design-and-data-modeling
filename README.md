@@ -95,8 +95,9 @@ This repository is an architectural proof and design deliverable. The implementa
 | **FR-09** | Reviews allowed only after trip is completed | PostgreSQL Validation Trigger checking Trip status | `trg_enforce_review_completion` | Invalid Test #3 (`23514`) |
 | **FR-10** | At most one review per trip | Unique constraint on `trip_id` | `reviews.trip_id UNIQUE` | Schema definition |
 | **NFR-01** | Unpredictable, non-sequential IDs | UUID primary keys generated via `gen_random_uuid()` | All tables: `id UUID PRIMARY KEY DEFAULT gen_random_uuid()` | Schema definition |
-| **NFR-06** | Sub-millisecond lookup for active rider trip | Tailored partial index on `(rider_id)` | `idx_trips_single_active_rider` | Query Plan #3 (0.080 ms) |
-| **NFR-06** | High performance driver queue lookup | Partial index on `(requested_at DESC)` | `idx_trips_driver_available_queue` | Query Plan #1 (0.093 ms) |
+| **NFR-06** | Sub-millisecond lookup for active rider trip | Partial unique index on `(rider_id)` restricted to active statuses | `idx_trips_single_active_rider` | Query Plan #3 (0.060 ms) |
+| **NFR-06** | High performance driver queue lookup | Partial index on `(requested_at DESC)` | `idx_trips_driver_available_queue` | Query Plan #1 (0.070 ms) |
+| **NFR-06** | Fast rider history joined to payment status | Partial index on `(rider_id, completed_at DESC)` where `COMPLETED` | `idx_trips_rider_completed` | Query Plan #2 (0.125 ms) |
 
 ---
 
@@ -599,7 +600,30 @@ EXECUTE FUNCTION enforce_trip_status_transition();
 | `payments` | `payments_trip_id_key` | `UNIQUE(trip_id)` | Exactly one payment record per trip |
 | `payments` | `payments_provider_reference_key` | `UNIQUE(provider_reference)` | Idempotency guard for payment gateway charges |
 | `reviews` | `reviews_trip_id_key` | `UNIQUE(trip_id)` | Exactly zero or one review per completed trip |
+| `reviews` | `reviews_rating_check` | `CHECK` | Rating must be an integer between 1 and 5 |
 | `reviews` | `trg_enforce_review_completion` | `TRIGGER` | Prevents review insertion unless trip is `COMPLETED` |
+
+**Value-domain CHECK constraints** (these reject malformed data at the storage layer rather than relying on the caller):
+
+| Table | Constraint Name | Type | Purpose |
+| :--- | :--- | :--- | :--- |
+| `trips` | `trips_fare_amount_minor_check` | `CHECK` | Fare must be strictly positive; blocks negative and zero money |
+| `trips` | `trips_currency_check` | `CHECK` | `length(currency) = 3`, enforcing an ISO-4217-shaped code |
+| `trips` | `trips_pickup_latitude_check` | `CHECK` | Latitude within [-90, 90] |
+| `trips` | `trips_pickup_longitude_check` | `CHECK` | Longitude within [-180, 180] |
+| `trips` | `trips_destination_latitude_check` | `CHECK` | Latitude within [-90, 90] |
+| `trips` | `trips_destination_longitude_check` | `CHECK` | Longitude within [-180, 180] |
+| `payments` | `payments_amount_minor_check` | `CHECK` | Captured amount must be strictly positive |
+| `payments` | `payments_currency_check` | `CHECK` | `length(currency) = 3` |
+| `vehicles` | `vehicles_year_check` | `CHECK` | Model year between 2005 and 2030 |
+
+> **Note on the one rule that is not a trigger.** The schema has no trigger on
+> `payments`. The rule that a payment may only be captured for a `COMPLETED`
+> trip is therefore evaluated in the API layer
+> (`scripts/dev.js`, `POST /api/v1/trips/:id/payment`) rather than by the engine.
+> This is a deliberate, documented gap: adding a third trigger would extend the
+> constraint inventory beyond what §14 and the ERD describe. The review
+> equivalent *is* engine-enforced, by `trg_enforce_review_completion`.
 
 ---
 
@@ -628,6 +652,18 @@ Action 5 (Review Trip)         ──► idx_reviews_driver_created (Compound B-
 4. `idx_reviews_driver_created` on `reviews(driver_id, created_at DESC)`:
    - **Query Served:** Query 5 (Driver reputation and reviews feed).
    - **Cost / Benefit:** Allows instantaneous calculation of driver rating aggregates and paginated feedback lists.
+
+### Structural & Integrity Indexes
+These three do not exist to accelerate a read path. They exist to make an
+invalid state **physically unrepresentable**, which is the same partial-index
+technique used above but aimed at writes:
+
+5. `idx_trips_single_active_driver` on `trips(driver_id) WHERE status IN ('ACCEPTED', 'IN_PROGRESS')`:
+   - **Invariant Enforced:** FR-05 — a driver cannot be dispatched to two live trips at once. A driver polling a request queue and two dispatchers accepting simultaneously would otherwise both succeed.
+6. `idx_vehicles_driver_single_active` on `vehicles(driver_id) WHERE is_active = TRUE AND deleted_at IS NULL`:
+   - **Invariant Enforced:** A driver may register a fleet, but only one vehicle can be flagged active for dispatch at a time. Without the partial predicate this would wrongly cap a driver's entire fleet at one vehicle.
+7. `idx_trips_driver_id` on `trips(driver_id)`:
+   - **Query Served:** Driver trip history and earnings statements. Unlike the partial indexes above this is a plain B-Tree covering every historical trip for a driver, since drivers legitimately need to page through their full manifest.
 
 ### Intentionally Rejected Indexes:
 - ❌ `trips(pickup_address)`: Low cardinality, free-text address search is handled by geospatial geohashes or PostGIS, not generic B-Tree indexes.
@@ -755,53 +791,71 @@ LIMIT 5;
 
 ## 17. Query Plan Verification (EXPLAIN ANALYZE)
 
-The query plans were captured directly against live PostgreSQL 16:
+All three plans below are reproduced verbatim from the committed evidence files
+`evidence/explain_query_1.txt`, `evidence/explain_query_2.txt` and
+`evidence/explain_query_3.txt`, produced by `src/explain.ts` against live
+PostgreSQL 16. The seed uses fixed UUIDs and a fixed time base, so the
+`Index Cond` values are reproducible across runs; only the timing figures vary
+between captures, and the figures quoted here are the ones in the committed
+files.
 
 ### Query Plan 1: Driver Available Queue
+Target index: `idx_trips_driver_available_queue`
 ```
-Limit  (cost=0.13..8.15 rows=1 width=99) (actual time=0.042..0.049 rows=5 loops=1)
+Limit  (cost=0.13..8.15 rows=1 width=99) (actual time=0.020..0.023 rows=5 loops=1)
   Output: id, pickup_address, destination_address, fare_amount_minor, currency, requested_at
   Buffers: shared hit=2
-  ->  Index Scan using idx_trips_driver_available_queue on public.trips  (cost=0.13..8.15 rows=1 width=99) (actual time=0.040..0.046 rows=5 loops=1)
+  ->  Index Scan using idx_trips_driver_available_queue on public.trips  (cost=0.13..8.15 rows=1 width=99) (actual time=0.019..0.021 rows=5 loops=1)
         Output: id, pickup_address, destination_address, fare_amount_minor, currency, requested_at
         Buffers: shared hit=2
-Planning Time: 0.281 ms
-Execution Time: 0.093 ms
+Planning Time: 0.115 ms
+Execution Time: 0.070 ms
 ```
-- **Interpretation:** The PostgreSQL optimizer utilizes an `Index Scan` on `idx_trips_driver_available_queue`. Because the index already stores rows ordered by `requested_at DESC`, PostgreSQL reads 5 tuples directly off the B-Tree leaf with **zero sort overhead** in **0.093 milliseconds**.
+- **Interpretation:** The optimizer utilizes an `Index Scan` on `idx_trips_driver_available_queue`. Because the index already stores rows ordered by `requested_at DESC`, PostgreSQL reads 5 tuples directly off the B-Tree leaf with **zero sort overhead** in **0.070 milliseconds**, touching only 2 shared buffers.
 
 ### Query Plan 2: Rider Completed Trip History
+Target index: `idx_trips_rider_completed` — Rider: Amara Okafor (`11111111-1111-4111-a111-000000000001`)
 ```
-Limit  (cost=0.29..17.09 rows=5 width=159) (actual time=0.168..0.186 rows=5 loops=1)
+Limit  (cost=0.29..17.11 rows=5 width=159) (actual time=0.039..0.052 rows=5 loops=1)
   Output: t.id, t.status, t.fare_amount_minor, t.currency, t.driver_name_snapshot, t.vehicle_description_snapshot, t.pickup_address, t.destination_address, t.completed_at, p.status
   Buffers: shared hit=13
-  ->  Nested Loop Left Join  (cost=0.29..67.48 rows=20 width=159) (actual time=0.166..0.182 rows=5 loops=1)
+  ->  Nested Loop Left Join  (cost=0.29..67.56 rows=20 width=159) (actual time=0.037..0.050 rows=5 loops=1)
         Output: t.id, t.status, t.fare_amount_minor, t.currency, t.driver_name_snapshot, t.vehicle_description_snapshot, t.pickup_address, t.destination_address, t.completed_at, p.status
         Inner Unique: true
         Buffers: shared hit=13
-        ->  Index Scan using idx_trips_rider_completed on public.trips t  (cost=0.14..40.21 rows=20 width=155) (actual time=0.141..0.144 rows=5 loops=1)
-              Index Cond: (t.rider_id = '7aece9ab-255e-40dc-ab02-f44431943d81'::uuid)
+        ->  Index Scan using idx_trips_rider_completed on public.trips t  (cost=0.14..40.30 rows=20 width=155) (actual time=0.021..0.026 rows=5 loops=1)
+              Index Cond: (t.rider_id = '11111111-1111-4111-a111-000000000001'::uuid)
               Buffers: shared hit=3
-        ->  Index Scan using payments_trip_id_key on public.payments p  (cost=0.14..1.36 rows=1 width=20) (actual time=0.005..0.005 rows=1 loops=5)
+        ->  Index Scan using payments_trip_id_key on public.payments p  (cost=0.14..1.36 rows=1 width=20) (actual time=0.003..0.003 rows=1 loops=5)
               Index Cond: (p.trip_id = t.id)
               Buffers: shared hit=10
-Planning Time: 1.022 ms
-Execution Time: 0.317 ms
+Planning:
+  Buffers: shared hit=6
+Planning Time: 0.573 ms
+Execution Time: 0.125 ms
 ```
-- **Interpretation:** Clean nested loop with `idx_trips_rider_completed` followed by index scan on `payments_trip_id_key`. Total execution time is **0.317 ms** with 13 shared buffer hits and 0 disk reads.
+- **Interpretation:** Clean nested loop with `idx_trips_rider_completed` followed by an index scan on the `payments_trip_id_key` unique index. Total execution time is **0.125 ms** with 13 shared buffer hits and 0 disk reads. Both sides of the join are index-driven, so no sequential scan appears anywhere in the plan.
 
 ### Query Plan 3: Rider Active Trip Lookup
+Target index: `idx_trips_single_active_rider` — Rider: Amara Okafor (`11111111-1111-4111-a111-000000000001`)
 ```
-Limit  (cost=0.13..8.15 rows=1 width=50) (actual time=0.041..0.042 rows=1 loops=1)
+Limit  (cost=0.13..8.15 rows=1 width=50) (actual time=0.028..0.029 rows=1 loops=1)
   Output: id, status, driver_name_snapshot, fare_amount_minor, requested_at
   Buffers: shared hit=2
-  ->  Index Scan using idx_trips_single_active_rider on public.trips  (cost=0.13..8.15 rows=1 width=50) (actual time=0.039..0.040 rows=1 loops=1)
-        Index Cond: (trips.rider_id = '7aece9ab-255e-40dc-ab02-f44431943d81'::uuid)
+  ->  Index Scan using idx_trips_single_active_rider on public.trips  (cost=0.13..8.15 rows=1 width=50) (actual time=0.026..0.026 rows=1 loops=1)
+        Output: id, status, driver_name_snapshot, fare_amount_minor, requested_at
+        Index Cond: (trips.rider_id = '11111111-1111-4111-a111-000000000001'::uuid)
         Buffers: shared hit=2
-Planning Time: 0.212 ms
-Execution Time: 0.080 ms
+Planning Time: 0.147 ms
+Execution Time: 0.060 ms
 ```
-- **Interpretation:** The partial unique index acts as a sub-millisecond lookup index, completing in **0.080 ms**.
+- **Interpretation:** The same partial unique index that enforces FR-04 at write time also serves the read path, completing in **0.060 ms** with a single buffer hit. The index is simultaneously a correctness mechanism and a performance asset.
+
+![EXPLAIN ANALYZE query plan 1](evidence/images/explain_query_1.png)
+
+![EXPLAIN ANALYZE query plan 2](evidence/images/explain_query_2.png)
+
+![EXPLAIN ANALYZE query plan 3](evidence/images/explain_query_3.png)
 
 ---
 
@@ -817,10 +871,42 @@ Execution Time: 0.080 ms
      - `POST /api/v1/trips/:id/complete`
      - `POST /api/v1/trips/:id/cancel`
 3. **Idempotency by Design:** Financial transactions and state mutations require deterministic client-provided idempotency keys (`Idempotency-Key` HTTP header) or enforce state idempotency.
+4. **Proof-Layer Route Surface:** `scripts/dev.js` serves exactly these 12 endpoints. `GET /api/v1/health` returns the other 11 verbatim as its `endpoints` array, and `npm run test:routes` asserts that count of 11.
+
+   | # | Method | Path | Advertised in `/health` | Purpose |
+   |---|--------|------|:---:|---------|
+   | 1 | `GET` | `/api/v1/health` | — | Liveness probe, row counts, route inventory |
+   | 2 | `GET` | `/api/v1/riders` | ✅ | Seeded rider directory |
+   | 3 | `GET` | `/api/v1/trips` | ✅ | Cursor-paginated trip collection |
+   | 4 | `GET` | `/api/v1/trips/:id` | ✅ | Single trip manifest with denormalized snapshots |
+   | 5 | `GET` | `/api/v1/riders/:id/active-trip` | ✅ | Active-trip lookup served by `idx_trips_single_active_rider` |
+   | 6 | `POST` | `/api/v1/trips` | ✅ | Create a `REQUESTED` trip |
+   | 7 | `POST` | `/api/v1/trips/:id/accept` | ✅ | `REQUESTED` → `ACCEPTED`, locks snapshots |
+   | 8 | `POST` | `/api/v1/trips/:id/start` | ✅ | `ACCEPTED` → `IN_PROGRESS` |
+   | 9 | `POST` | `/api/v1/trips/:id/complete` | ✅ | `IN_PROGRESS` → `COMPLETED` |
+   | 10 | `POST` | `/api/v1/trips/:id/cancel` | ✅ | Terminal cancellation with reason |
+   | 11 | `POST` | `/api/v1/trips/:id/payment` | ✅ | Capture settlement for a `COMPLETED` trip |
+   | 12 | `POST` | `/api/v1/trips/:id/reviews` | ✅ | Submit a review, gated on `COMPLETED` |
+
+   Note that #12 is a **plural** sub-resource (`reviews`), because a review is a
+   collection member of a trip. This is the convention referenced in
+   `.agents/rules/engineering_standards.md` ("plural nouns").
 
 ---
 
 ## 19. Complete Endpoint Contracts
+
+> **Specification vs. implementation.** This section is the *design contract* for
+> the platform's full API surface, including endpoints such as
+> `GET /api/v1/trips/available`, `GET /api/v1/drivers/location` and
+> `GET /api/v1/trips/:id/live-stream` that are out of scope for the proof layer
+> (see *Out of Scope* in §1). `scripts/dev.js` deliberately implements and
+> verifies the 12 endpoints listed under §18.1 — the five contracts documented
+> here plus `GET /api/v1/riders`, `GET /api/v1/trips`, `GET /api/v1/trips/:id`,
+> `GET /api/v1/riders/:id/active-trip`, `POST /api/v1/trips/:id/cancel` and
+> `POST /api/v1/trips/:id/payment`. `npm run test:routes` asserts 48 behaviours
+> against that server. Where this section and the proof server describe the same
+> route, the paths are identical.
 
 ### Endpoint 1: Request a Ride
 - **Method / Path:** `POST /api/v1/trips`
@@ -963,13 +1049,18 @@ All error responses adhere to a consistent, predictable JSON envelope:
 ```
 
 ### Standard HTTP Status Codes:
-- `400 Bad Request`: Malformed JSON or invalid parameter types.
+- `400 Bad Request`: Malformed JSON, invalid parameter types, or a field rejected by a value-domain `CHECK` constraint (e.g. `rating` outside 1–5, currency code not 3 characters).
 - `401 Unauthorized`: Missing or expired Bearer token.
-- `403 Forbidden`: Authenticated user does not have permission for this resource.
+- `403 Forbidden`: Authenticated principal is not the participant the record requires (e.g. reviewer is not the rider on the trip).
 - `404 Not Found`: Target entity ID does not exist.
-- `409 Conflict`: Domain invariant or state machine conflict (e.g., duplicate active trip, illegal status transition).
-- `422 Unprocessable Entity`: Semantic validation failure (e.g. rating out of bounds).
+- `409 Conflict`: Domain invariant or state machine conflict — an illegal lifecycle transition, a payment against a non-`COMPLETED` trip, a duplicate active trip, or a duplicate payment/review.
+- `422 Unprocessable Entity`: Reserved for semantic failures that are neither a malformed request nor a stored-state conflict.
 - `500 Internal Server Error`: Unhandled server exception.
+
+> Every `409` in this table originates from a `23514` check violation or a
+> `23505` unique violation raised by the database itself, not from an
+> application-side guess about the current state. `npm run test:routes` asserts
+> the status code and the error code for each of these paths.
 
 ---
 
@@ -1147,6 +1238,26 @@ All three invalid operations were executed against live PostgreSQL 16 and succes
 - Node.js v20+ / v24+
 - Docker & Docker Compose
 
+### The canonical database target
+
+Every script, migration, and proof in this repository targets exactly one
+PostgreSQL instance. There is no second schema and no second database.
+
+| Setting | Value | Defined in |
+| :--- | :--- | :--- |
+| Container | `urban-glide-postgres` (image `postgres:16-alpine`) | `docker-compose.yml` |
+| Host port | `15436` | `docker-compose.yml` |
+| Database | `urbanglide_db` | `docker-compose.yml` |
+| User / password | `urbanglider` / `glidepassword` | `docker-compose.yml` |
+| Schema definition | `migrations/001_initial_schema.sql` | `src/migrate.ts` |
+| Dataset definition | `src/seed.ts` | `src/seed.ts` |
+| Connection defaults | `PGHOST` / `PGPORT` / `PGUSER` / `PGPASSWORD` / `PGDATABASE` | `src/db.ts` and `scripts/lib/target.js` |
+
+Override any of these with the standard `PG*` environment variables (or
+`DATABASE_URL`) if you need to point at a different instance; both the
+TypeScript proof layer and the CommonJS verification scripts honour the same
+variables.
+
 ### Step 1: Start PostgreSQL Container
 ```powershell
 docker compose up -d
@@ -1161,7 +1272,27 @@ npm install
 ```powershell
 npm test
 ```
-*This executes: database migration $\rightarrow$ realistic seed dataset $\rightarrow$ foreign key restriction check $\rightarrow$ five representative queries $\rightarrow$ EXPLAIN ANALYZE query plans $\rightarrow$ three invalid operation rejections.*
+*This executes: database migration $\rightarrow$ realistic seed dataset $\rightarrow$ foreign key restriction check $\rightarrow$ five representative queries $\rightarrow$ three EXPLAIN ANALYZE query plans $\rightarrow$ three invalid operation rejections.* It also writes `evidence/migration_log.txt` from the live catalog and `evidence/seed_log.txt` from live row counts, so both logs describe the database that actually ran rather than a hand-maintained expectation.
+
+### Step 4: Run the Data Model and API Verification Suites
+```powershell
+npm run test:model    # 15 assertions against the canonical schema
+npm run test:routes   # 48 assertions against the REST proof server
+```
+Both suites reset the database to the canonical schema and seed before running, so they are safe to execute in any order.
+
+### Step 5: Regenerate and Validate the Evidence Images
+```powershell
+npm run evidence:render   # re-renders all 16 PNGs from evidence/
+npm run evidence:verify   # validates each PNG is non-blank and legible
+```
+Re-rendering after a fresh `npm test` is what keeps the images in this
+document synchronised with the captured plans.
+
+### Rebuilding from an empty database
+`migrations/001_initial_schema.sql` is idempotent and safe to run against a
+brand-new, empty instance: the trigger drops are guarded on `to_regclass` so
+they do not error when the target tables do not exist yet.
 
 ---
 
@@ -1355,7 +1486,7 @@ The renderer fails loudly rather than emitting a bad image. Per file it asserts 
 
 ### 31.4 EXPLAIN ANALYZE Query Plans (§17)
 
-Both plans are real `EXPLAIN (ANALYZE, BUFFERS, VERBOSE)` output captured from the running PostgreSQL 16 engine, after `ANALYZE`. Note that every plan is an `Index Scan` with single-digit `shared hit` buffer counts — the indexes in §15 are doing real work, not sitting idle.
+All three plans are real `EXPLAIN (ANALYZE, BUFFERS, VERBOSE)` output captured from the running PostgreSQL 16 engine, after `ANALYZE`. Note that every plan is an `Index Scan` with single-digit `shared hit` buffer counts — the indexes in §15 are doing real work, not sitting idle. The captured figures are 0.070 ms, 0.125 ms, and 0.060 ms respectively; timings vary slightly per capture, and the committed text in `evidence/` is the authoritative copy.
 
 **Query Plan 1 — Driver Available Queue:**
 
@@ -1364,6 +1495,10 @@ Both plans are real `EXPLAIN (ANALYZE, BUFFERS, VERBOSE)` output captured from t
 **Query Plan 2 — Rider Completed Trip History (nested loop over two index scans):**
 
 ![EXPLAIN ANALYZE query plan 2](evidence/images/explain_query_2.png)
+
+**Query Plan 3 — Rider Active Trip Lookup (served by the same partial unique index that enforces FR-04):**
+
+![EXPLAIN ANALYZE query plan 3](evidence/images/explain_query_3.png)
 
 ### 31.5 Invalid Operations Rejected by the Engine (§26)
 

@@ -86,6 +86,10 @@ export async function runExplainPlans() {
   `, [riderRow.id]);
   const plan3Text = plan3Rows.map((r: any) => r['QUERY PLAN']).join('\n');
   console.log(plan3Text);
+  fs.writeFileSync(
+    path.join(evidenceDir, 'explain_query_3.txt'),
+    `--- EXPLAIN ANALYZE: Rider Active Trip Lookup ---\nTarget Index: idx_trips_single_active_rider\nRider: ${riderRow.name} (${riderRow.id})\n\n${plan3Text}\n`
+  );
 
   console.log('\n================================================================');
   console.log('QUERY PLANS CAPTURED AND RECORDED TO EVIDENCE DIRECTORY');

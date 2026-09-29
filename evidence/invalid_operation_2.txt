@@ -1,11 +1,11 @@
 --- INVALID OPERATION 2: Forbidden Trip State Transition ---
 Requirement: FR-03 (Completed trip cannot return to in-progress or cancelled)
-Target Trip: 40467c99-6f47-4213-af21-a199c08766d7 (status: COMPLETED)
+Target Trip: 44444444-4444-4444-a444-000000000001 (status: COMPLETED)
 
 SQL ATTEMPTED:
 UPDATE trips 
     SET status = 'IN_PROGRESS' 
-    WHERE id = '40467c99-6f47-4213-af21-a199c08766d7';
+    WHERE id = '44444444-4444-4444-a444-000000000001';
 
 DATABASE ENGINE RESPONSE:
 Error Message: Invalid trip state transition: COMPLETED trips cannot transition to IN_PROGRESS

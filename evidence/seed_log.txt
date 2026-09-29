@@ -1,17 +1,21 @@
 --- DATABASE SEED LOG ---
-Timestamp: 2026-09-28T07:35:25.679Z
+Timestamp: 2026-09-29T17:06:20.312Z
+Source: src/seed.ts (deterministic UUID and timestamp fixtures)
 Database: urbanglide_db
 
 STATUS: SUCCESS
-Dataset summary:
-- 10 Riders created
-- 10 Drivers created
-- 10 Active vehicles created
-- 200 Completed historical trips created
-- 200 Settled payments created
-- 150 Ratings & reviews created
-- 15 Cancelled trips created
-- 5 Available REQUESTED trips created
-- 1 Active ACCEPTED trip created
-- 1 Active IN_PROGRESS trip created
-- ANALYZE execution executed across all tables.
+
+Row counts read back from the database:
+  - riders:   10
+  - drivers:  10
+  - vehicles: 10
+  - trips:    222
+  - payments: 200
+  - reviews:  150
+
+Trips by status:
+  - ACCEPTED: 1
+  - CANCELLED: 15
+  - COMPLETED: 200
+  - IN_PROGRESS: 1
+  - REQUESTED: 5

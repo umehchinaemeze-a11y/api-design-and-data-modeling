@@ -1,7 +1,7 @@
 --- INVALID OPERATION 1: Rider Multiple Active Trips ---
 Requirement: FR-04 (One rider cannot have multiple active trips simultaneously)
-Target: Rider Amara Okafor (8ba55315-af73-4f23-86f9-c0b5d90f53ed)
-Existing active trip: 2faa45a6-8496-475f-a795-35ee51d1c037 (ACCEPTED)
+Target: Rider Amara Okafor (11111111-1111-4111-a111-000000000001)
+Existing active trip: 44444444-4444-4444-a444-000000000221 (ACCEPTED)
 
 SQL ATTEMPTED:
 INSERT INTO trips (
@@ -9,7 +9,7 @@ INSERT INTO trips (
       destination_latitude, destination_longitude, destination_address,
       status, fare_amount_minor, currency
     ) VALUES (
-      '8ba55315-af73-4f23-86f9-c0b5d90f53ed', 6.4300, 3.4200, 'Test Pickup 2',
+      '11111111-1111-4111-a111-000000000001', 6.4300, 3.4200, 'Test Pickup 2',
       6.4500, 3.4400, 'Test Destination 2',
       'REQUESTED', 450000, 'NGN'
     );
@@ -18,5 +18,5 @@ DATABASE ENGINE RESPONSE:
 Error Message: duplicate key value violates unique constraint "idx_trips_single_active_rider"
 PostgreSQL SQLSTATE: 23505 (unique_violation)
 Constraint: idx_trips_single_active_rider
-Detail: Key (rider_id)=(8ba55315-af73-4f23-86f9-c0b5d90f53ed) already exists.
+Detail: Key (rider_id)=(11111111-1111-4111-a111-000000000001) already exists.
 Verdict: REJECTED AS EXPECTED (PASS)
