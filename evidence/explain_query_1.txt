@@ -1,11 +1,11 @@
 --- EXPLAIN ANALYZE: Driver Available Pending Queue ---
 Target Index: idx_trips_driver_available_queue
 
-Limit  (cost=0.13..8.15 rows=1 width=99) (actual time=0.021..0.024 rows=5 loops=1)
+Limit  (cost=0.13..8.15 rows=1 width=99) (actual time=0.027..0.033 rows=5 loops=1)
   Output: id, pickup_address, destination_address, fare_amount_minor, currency, requested_at
   Buffers: shared hit=2
-  ->  Index Scan using idx_trips_driver_available_queue on public.trips  (cost=0.13..8.15 rows=1 width=99) (actual time=0.020..0.023 rows=5 loops=1)
+  ->  Index Scan using idx_trips_driver_available_queue on public.trips  (cost=0.13..8.15 rows=1 width=99) (actual time=0.026..0.030 rows=5 loops=1)
         Output: id, pickup_address, destination_address, fare_amount_minor, currency, requested_at
         Buffers: shared hit=2
-Planning Time: 0.115 ms
-Execution Time: 0.060 ms
+Planning Time: 0.150 ms
+Execution Time: 0.076 ms

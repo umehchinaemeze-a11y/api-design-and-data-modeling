@@ -1,6 +1,7 @@
 const { spawn } = require('child_process');
 const path = require('path');
-const { provision } = require('./lib/provision');
+const { Client } = require('pg');
+const { provision, TARGET } = require('./lib/provision');
 
 const PORT = Number(process.env.TEST_PORT || 3111);
 const ORIGIN = `http://localhost:${PORT}`;
@@ -52,7 +53,50 @@ const RIDER_NO_ACTIVE = ID.rider(4);  // only holds terminal trips
 const RIDER_ACTIVE = ID.rider(1);     // holds trip 221
 
 let pass = 0, fail = 0;
+let cleanupFailed = false;
 const rows = [];
+
+/* Every row this suite creates, recorded so cleanup() can remove exactly its own
+ * fixtures and nothing else. Seed rows are deliberately NOT tracked: the suite
+ * only advances their status, and provision() truncates and re-seeds at the
+ * start of every run, so they never need deleting here. */
+const created = { trips: new Set(), providerReferences: new Set() };
+
+/* Restores the database to the exact row counts provision() established.
+ *
+ * Deletion order respects the FK graph: reviews and payments both reference
+ * trips with ON DELETE RESTRICT, so children go first and the parent trips go
+ * last. Scoped strictly to ids this suite created, so no seed or unrelated test
+ * row can be removed. Runs from a finally block, so a failed assertion or a
+ * thrown error still leaves the database clean.
+ *
+ * A cleanup failure is a suite failure: silently leaving residue behind would
+ * make the row counts drift and hide regressions. */
+async function cleanup() {
+    if (created.trips.size === 0 && created.providerReferences.size === 0) return;
+    const client = new Client({ connectionString: TARGET.connectionString });
+    await client.connect();
+    try {
+        await client.query('BEGIN');
+        if (created.providerReferences.size > 0) {
+            await client.query('DELETE FROM payments WHERE provider_reference = ANY($1::text[])',
+                [[...created.providerReferences]]);
+        }
+        if (created.trips.size > 0) {
+            await client.query('DELETE FROM reviews WHERE trip_id = ANY($1::uuid[])',
+                [[...created.trips]]);
+            await client.query('DELETE FROM trips WHERE id = ANY($1::uuid[])',
+                [[...created.trips]]);
+        }
+        await client.query('COMMIT');
+    } catch (err) {
+        await client.query('ROLLBACK').catch(() => {});
+        cleanupFailed = true;
+        console.error(`  [CLEANUP FAILED] ${err.message}`);
+    } finally {
+        await client.end();
+    }
+}
 
 function check(name, cond, detail) {
     if (cond) { pass++; rows.push(`  [PASS] ${name}`); }
@@ -71,23 +115,10 @@ async function call(method, path, body) {
     return { status: res.status, body: json };
 }
 
-async function main() {
-    console.log('================================================================');
-    console.log('      URBANGLIDE API ROUTE VERIFICATION (start/cancel/payment)   ');
-    console.log('================================================================\n');
-
-    // Deterministic baseline: canonical schema + canonical seed, then boot a throwaway server
-    await provision();
-    server = spawn(process.execPath, [path.join(__dirname, 'dev.js')], {
-        env: { ...process.env, PORT: String(PORT) },
-        stdio: 'ignore'
-    });
-    if (!await waitForServer()) {
-        stopServer();
-        console.error(`Server did not become ready on ${ORIGIN}. Is PostgreSQL reachable?`);
-        process.exit(1);
-    }
-
+/* The assertions themselves, run against a booted server. Separated from main()
+ * so the try/finally that guarantees cleanup can wrap the whole body without
+ * re-indenting it. */
+async function runGroups() {
     console.log('GROUP A: POST /api/v1/trips/:id/start');
     {
         const r = await call('POST', `/trips/${TRIP.accepted}/start`);
@@ -155,6 +186,7 @@ async function main() {
         check('setup: create trip for full lifecycle -> 201 requested',
             r.status === 201 && r.body?.trip?.status === 'REQUESTED', `status=${r.status} body=${JSON.stringify(r.body)}`);
         payable = r.body?.trip?.id;
+        if (payable) created.trips.add(payable);
     }
     {
         const r = await call('POST', `/trips/${payable}/payment`, { amountMinor: 3450, currency: 'USD', providerReference: 'ch_elig_requested' });
@@ -203,6 +235,7 @@ async function main() {
     }
     {
         const r = await call('POST', `/trips/${payable}/payment`, { amountMinor: 3450, currency: 'USD', providerReference: 'ch_route_test_unique' });
+        if (r.status === 201) created.providerReferences.add('ch_route_test_unique');
         check('payment on completed trip -> 201',
             r.status === 201 && r.body?.payment, `status=${r.status} body=${JSON.stringify(r.body)}`);
         check('payment settles to payment_status_enum COMPLETED',
@@ -238,10 +271,12 @@ async function main() {
             fareAmountMinor: 1500, currency: 'USD'
         });
         const t2 = c.body?.trip?.id;
+        if (t2) created.trips.add(t2);
         await call('POST', `/trips/${t2}/accept`, { driverId: DRIVER_FREE, vehicleId: VEHICLE_FREE });
         await call('POST', `/trips/${t2}/start`, {});
         await call('POST', `/trips/${t2}/complete`, {});
         const r = await call('POST', `/trips/${t2}/payment`, { amountMinor: 1500, providerReference: 'ch_default_currency' });
+        if (r.status === 201) created.providerReferences.add('ch_default_currency');
         check('payment without currency defaults to NGN (platform default) -> 201',
             r.status === 201 && r.body?.payment?.currency === 'NGN', `status=${r.status} body=${JSON.stringify(r.body)}`);
     }
@@ -314,14 +349,42 @@ async function main() {
         check('GET on action sub-resource -> 404 (method mismatch, not 200)',
             r.status === 404, `status=${r.status}`);
     }
+}
+
+async function main() {
+    console.log('================================================================');
+    console.log('      URBANGLIDE API ROUTE VERIFICATION (start/cancel/payment)   ');
+    console.log('================================================================\n');
+
+    // Deterministic baseline: canonical schema + canonical seed, then boot a throwaway server
+    await provision();
+    server = spawn(process.execPath, [path.join(__dirname, 'dev.js')], {
+        env: { ...process.env, PORT: String(PORT) },
+        stdio: 'ignore'
+    });
+    if (!await waitForServer()) {
+        stopServer();
+        console.error(`Server did not become ready on ${ORIGIN}. Is PostgreSQL reachable?`);
+        process.exit(1);
+    }
+
+    // Teardown runs on every path: a passed assertion, a failed assertion, or a
+    // thrown harness error. process.exit() must therefore come *after* this,
+    // never inside the try, or it would terminate before cleanup.
+    try {
+        await runGroups();
+    } finally {
+        stopServer();
+        await cleanup();
+    }
 
     console.log('');
     rows.forEach(r => console.log(r));
     console.log('\n================================================================');
     console.log(`ROUTE TEST RESULTS: ${pass} PASSED, ${fail} FAILED`);
+    console.log(`CLEANUP: test fixtures ${cleanupFailed ? 'FAILED to remove' : 'removed (database left at seed baseline)'}`);
     console.log('================================================================\n');
-    stopServer();
-    process.exit(fail > 0 ? 1 : 0);
+    process.exit(fail > 0 || cleanupFailed ? 1 : 0);
 }
 
-main().catch(err => { stopServer(); console.error('Harness error:', err); process.exit(1); });
+main().catch(err => { stopServer(); cleanup().finally(() => { console.error('Harness error:', err); process.exit(1); }); });

@@ -61,7 +61,7 @@ Every architectural entity, constraint, index, API endpoint, and proof query in 
 - **FR-05 (Single Active Trip per Driver):** At most one active trip (`ACCEPTED`, `IN_PROGRESS`) is permitted per driver at any given moment.
 - **FR-06 (Immutable Fare Snapshot):** Fare amount and currency are frozen upon trip creation/acceptance and cannot be recalculated after completion.
 - **FR-07 (Driver & Vehicle Snapshotting):** The driver’s full name and vehicle description are permanently snapshotted into the trip record upon acceptance.
-- **FR-08 (Financial Settlement):** Payments record the finalized transaction with idempotency provider references and minor-unit amounts.
+- **FR-08 (Exact Monetary Settlement):** A payment records the finalized transaction as exact integer minor units paired with an ISO-4217 currency code, never a floating-point value, so no amount can lose precision; each payment carries a unique provider reference that makes settlement idempotent.
 - **FR-09 (Gated Reviews):** Reviews can only be submitted for `COMPLETED` trips; attempts to review active or cancelled trips are rejected.
 - **FR-10 (Review Cardinality):** Exactly zero or one review can exist for a given trip.
 - **FR-11 (Payment Completion Gating):** A payment can only be captured for a `COMPLETED` trip. Direct inserts against a non-completed trip are rejected by the database engine, not merely by API validation.
@@ -99,7 +99,7 @@ To preserve architectural focus and adhere to the proof-layer scope, the followi
 | **FR-03** | Completed trip cannot return to in-progress or cancelled | PostgreSQL Transition Trigger raising SQLSTATE exception | `trg_enforce_trip_status_transition` on `BEFORE UPDATE OF status` | Invalid Test #2 (Transition `COMPLETED` $\rightarrow$ `IN_PROGRESS`) |
 | **FR-06** | Historical trip fare remains immutable | Fare snapshot columns on Trip record | `trips.fare_amount_minor`, `trips.currency` | Seed verification & Query #3 inspection |
 | **FR-07** | Historical driver/vehicle identity remains stable | Denormalized snapshot strings on Trip | `trips.driver_name_snapshot`, `trips.vehicle_description_snapshot` | Query #3 inspection |
-| **FR-08** | Money must be exact without precision loss | BigInt minor units + ISO 4217 currency | `trips.fare_amount_minor BIGINT`, `payments.amount_minor BIGINT` | Schema definition & payment test |
+| **FR-08** | Settled money is exact, with no floating-point precision loss | 64-bit integer minor units + ISO-4217 currency + UNIQUE provider reference for idempotency | `trips.fare_amount_minor BIGINT`, `payments.amount_minor BIGINT`, `trips.currency VARCHAR(3)` and `payments.currency VARCHAR(3)` with `CHECK (length = 3)`, `payments.provider_reference VARCHAR(100) UNIQUE` | Schema definition, Invalid Test #4, Valid Test #1, route payment tests |
 | **FR-09** | Reviews allowed only after trip is completed | PostgreSQL Validation Trigger checking Trip status on insert | `trg_enforce_review_completion` on `BEFORE INSERT ON reviews` | Invalid Test #3 (Review for `IN_PROGRESS` trip) |
 | **FR-10** | At most one review per trip | Unique constraint on `trip_id` | `reviews.trip_id UNIQUE` | Schema definition |
 | **FR-11** | A payment can only be captured for a completed trip | PostgreSQL Validation Trigger checking Trip status on insert, plus an API pre-check for a precise client-facing error | `trg_enforce_payment_completion` on `BEFORE INSERT ON payments` | Invalid Test #4 (`23514`, all four non-terminal statuses) & Valid Test #5 |

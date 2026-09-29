@@ -69,7 +69,7 @@ This repository is an architectural proof and design deliverable. The implementa
 - **FR-05 (Single Active Trip per Driver):** A driver can be assigned to at most ONE active trip (`ACCEPTED`, `IN_PROGRESS`) simultaneously.
 - **FR-06 (Immutable Fare Snapshot):** Fare amount and currency are frozen upon trip creation/acceptance and cannot be recalculated after completion.
 - **FR-07 (Driver & Vehicle Snapshotting):** The driver’s full name and vehicle description are permanently snapshotted into the trip record upon acceptance.
-- **FR-08 (Financial Settlement):** Payments record the finalized transaction with idempotency provider references and minor-unit amounts.
+- **FR-08 (Exact Monetary Settlement):** A payment records the finalized transaction as exact integer minor units paired with an ISO-4217 currency code, never a floating-point value, so no amount can lose precision; each payment carries a unique provider reference that makes settlement idempotent.
 - **FR-09 (Gated Reviews):** Reviews can only be submitted for `COMPLETED` trips; attempts to review active or cancelled trips are rejected.
 - **FR-10 (Review Cardinality):** Exactly zero or one review can exist for a given trip.
 
@@ -91,14 +91,14 @@ This repository is an architectural proof and design deliverable. The implementa
 | **FR-03** | Completed trip cannot return to in-progress | PostgreSQL PL/pgSQL trigger on `BEFORE UPDATE` | `trg_enforce_trip_status_transition` | Invalid Test #2 (`23514`) |
 | **FR-06** | Historical trip fare remains immutable | Fare snapshot columns on Trip record | `trips.fare_amount_minor`, `trips.currency` | Seed verification & Query #3 |
 | **FR-07** | Historical driver/vehicle identity remains stable | Denormalized snapshot strings on Trip | `trips.driver_name_snapshot`, `trips.vehicle_description_snapshot` | Query #3 inspection |
-| **FR-08** | Money must be exact without precision loss | BigInt minor units + ISO 4217 currency | `trips.fare_amount_minor BIGINT`, `payments.amount_minor BIGINT` | Schema definition & payment test |
+| **FR-08** | Settled money is exact, with no floating-point precision loss | 64-bit integer minor units + ISO-4217 currency + UNIQUE provider reference for idempotency | `trips.fare_amount_minor BIGINT`, `payments.amount_minor BIGINT`, `trips.currency VARCHAR(3)` and `payments.currency VARCHAR(3)` with `CHECK (length = 3)`, `payments.provider_reference VARCHAR(100) UNIQUE` | Schema definition, Invalid Test #4, Valid Test #1, route payment tests |
 | **FR-09** | Reviews allowed only after trip is completed | PostgreSQL Validation Trigger checking Trip status | `trg_enforce_review_completion` | Invalid Test #3 (`23514`) |
 | **FR-10** | At most one review per trip | Unique constraint on `trip_id` | `reviews.trip_id UNIQUE` | Schema definition |
 | **FR-11** | A payment may only be captured for a completed trip | PostgreSQL Validation Trigger checking Trip status, plus an API pre-check for a precise client error | `trg_enforce_payment_completion` | Invalid Test #4 (`23514`), Valid Test #5 |
 | **NFR-01** | Unpredictable, non-sequential IDs | UUID primary keys generated via `gen_random_uuid()` | All tables: `id UUID PRIMARY KEY DEFAULT gen_random_uuid()` | Schema definition |
-| **NFR-06** | Sub-millisecond lookup for active rider trip | Partial unique index on `(rider_id)` restricted to active statuses | `idx_trips_single_active_rider` | Query Plan #3 (0.069 ms) |
-| **NFR-06** | High performance driver queue lookup | Partial index on `(requested_at DESC)` | `idx_trips_driver_available_queue` | Query Plan #1 (0.060 ms) |
-| **NFR-06** | Fast rider history joined to payment status | Partial index on `(rider_id, completed_at DESC)` where `COMPLETED` | `idx_trips_rider_completed` | Query Plan #2 (0.166 ms) |
+| **NFR-06** | Sub-millisecond lookup for active rider trip | Partial unique index on `(rider_id)` restricted to active statuses | `idx_trips_single_active_rider` | Query Plan #3 (0.055 ms) |
+| **NFR-06** | High performance driver queue lookup | Partial index on `(requested_at DESC)` | `idx_trips_driver_available_queue` | Query Plan #1 (0.076 ms) |
+| **NFR-06** | Fast rider history joined to payment status | Partial index on `(rider_id, completed_at DESC)` where `COMPLETED` | `idx_trips_rider_completed` | Query Plan #2 (0.284 ms) |
 
 ---
 
@@ -821,54 +821,56 @@ files.
 ### Query Plan 1: Driver Available Queue
 Target index: `idx_trips_driver_available_queue`
 ```
-Limit  (cost=0.13..8.15 rows=1 width=99) (actual time=0.021..0.024 rows=5 loops=1)
+Limit  (cost=0.13..8.15 rows=1 width=99) (actual time=0.027..0.033 rows=5 loops=1)
   Output: id, pickup_address, destination_address, fare_amount_minor, currency, requested_at
   Buffers: shared hit=2
-  ->  Index Scan using idx_trips_driver_available_queue on public.trips  (cost=0.13..8.15 rows=1 width=99) (actual time=0.020..0.023 rows=5 loops=1)
+  ->  Index Scan using idx_trips_driver_available_queue on public.trips  (cost=0.13..8.15 rows=1 width=99) (actual time=0.026..0.030 rows=5 loops=1)
         Output: id, pickup_address, destination_address, fare_amount_minor, currency, requested_at
         Buffers: shared hit=2
-Planning Time: 0.115 ms
-Execution Time: 0.060 ms
+Planning Time: 0.150 ms
+Execution Time: 0.076 ms
 ```
-- **Interpretation:** The optimizer utilizes an `Index Scan` on `idx_trips_driver_available_queue`. Because the index already stores rows ordered by `requested_at DESC`, PostgreSQL reads 5 tuples directly off the B-Tree leaf with **zero sort overhead** in **0.060 milliseconds**, touching only 2 shared buffers.
+- **Interpretation:** The optimizer utilizes an `Index Scan` on `idx_trips_driver_available_queue`. Because the index already stores rows ordered by `requested_at DESC`, PostgreSQL reads 5 tuples directly off the B-Tree leaf with **zero sort overhead** in **0.076 milliseconds**, touching only 2 shared buffers.
 
 ### Query Plan 2: Rider Completed Trip History
 Target index: `idx_trips_rider_completed` — Rider: Amara Okafor (`11111111-1111-4111-a111-000000000001`)
 ```
-Limit  (cost=0.29..17.11 rows=5 width=159) (actual time=0.032..0.045 rows=5 loops=1)
+Limit  (cost=0.29..17.11 rows=5 width=159) (actual time=0.151..0.159 rows=5 loops=1)
   Output: t.id, t.status, t.fare_amount_minor, t.currency, t.driver_name_snapshot, t.vehicle_description_snapshot, t.pickup_address, t.destination_address, t.completed_at, p.status
   Buffers: shared hit=13
-  ->  Nested Loop Left Join  (cost=0.29..67.56 rows=20 width=159) (actual time=0.031..0.043 rows=5 loops=1)
+  ->  Nested Loop Left Join  (cost=0.29..67.56 rows=20 width=159) (actual time=0.150..0.157 rows=5 loops=1)
         Output: t.id, t.status, t.fare_amount_minor, t.currency, t.driver_name_snapshot, t.vehicle_description_snapshot, t.pickup_address, t.destination_address, t.completed_at, p.status
         Inner Unique: true
         Buffers: shared hit=13
-        ->  Index Scan using idx_trips_rider_completed on public.trips t  (cost=0.14..40.30 rows=20 width=155) (actual time=0.017..0.020 rows=5 loops=1)
+        ->  Index Scan using idx_trips_rider_completed on public.trips t  (cost=0.14..40.30 rows=20 width=155) (actual time=0.110..0.112 rows=5 loops=1)
+              Output: t.id, t.rider_id, t.driver_id, t.vehicle_id, t.pickup_latitude, t.pickup_longitude, t.pickup_address, t.destination_latitude, t.destination_longitude, t.destination_address, t.status, t.fare_amount_minor, t.currency, t.driver_name_snapshot, t.vehicle_description_snapshot, t.requested_at, t.accepted_at, t.started_at, t.completed_at, t.cancelled_at, t.cancellation_reason, t.created_at, t.updated_at
               Index Cond: (t.rider_id = '11111111-1111-4111-a111-000000000001'::uuid)
               Buffers: shared hit=3
-        ->  Index Scan using payments_trip_id_key on public.payments p  (cost=0.14..1.36 rows=1 width=20) (actual time=0.003..0.003 rows=1 loops=5)
+        ->  Index Scan using payments_trip_id_key on public.payments p  (cost=0.14..1.36 rows=1 width=20) (actual time=0.008..0.008 rows=1 loops=5)
+              Output: p.id, p.trip_id, p.amount_minor, p.currency, p.status, p.provider_reference, p.payment_method, p.paid_at, p.created_at, p.updated_at
               Index Cond: (p.trip_id = t.id)
               Buffers: shared hit=10
 Planning:
   Buffers: shared hit=6
-Planning Time: 0.504 ms
-Execution Time: 0.166 ms
+Planning Time: 0.364 ms
+Execution Time: 0.284 ms
 ```
-- **Interpretation:** Clean nested loop with `idx_trips_rider_completed` followed by an index scan on the `payments_trip_id_key` unique index. Total execution time is **0.166 ms** with 13 shared buffer hits and 0 disk reads. Both sides of the join are index-driven, so no sequential scan appears anywhere in the plan.
+- **Interpretation:** Clean nested loop with `idx_trips_rider_completed` followed by an index scan on the `payments_trip_id_key` unique index. Total execution time is **0.284 ms** with 13 shared buffer hits and 0 disk reads. Both sides of the join are index-driven, so no sequential scan appears anywhere in the plan.
 
 ### Query Plan 3: Rider Active Trip Lookup
 Target index: `idx_trips_single_active_rider` — Rider: Amara Okafor (`11111111-1111-4111-a111-000000000001`)
 ```
-Limit  (cost=0.13..8.15 rows=1 width=50) (actual time=0.031..0.032 rows=1 loops=1)
+Limit  (cost=0.13..8.15 rows=1 width=50) (actual time=0.031..0.031 rows=1 loops=1)
   Output: id, status, driver_name_snapshot, fare_amount_minor, requested_at
   Buffers: shared hit=2
   ->  Index Scan using idx_trips_single_active_rider on public.trips  (cost=0.13..8.15 rows=1 width=50) (actual time=0.029..0.030 rows=1 loops=1)
         Output: id, status, driver_name_snapshot, fare_amount_minor, requested_at
         Index Cond: (trips.rider_id = '11111111-1111-4111-a111-000000000001'::uuid)
         Buffers: shared hit=2
-Planning Time: 0.198 ms
-Execution Time: 0.069 ms
+Planning Time: 0.114 ms
+Execution Time: 0.055 ms
 ```
-- **Interpretation:** The same partial unique index that enforces FR-04 at write time also serves the read path, completing in **0.069 ms** with a single buffer hit. The index is simultaneously a correctness mechanism and a performance asset.
+- **Interpretation:** The same partial unique index that enforces FR-04 at write time also serves the read path, completing in **0.055 ms** with a single buffer hit. The index is simultaneously a correctness mechanism and a performance asset.
 
 ![EXPLAIN ANALYZE query plan 1](evidence/images/explain_query_1.png)
 
@@ -1553,7 +1555,7 @@ The renderer fails loudly rather than emitting a bad image. Per file it asserts 
 
 ### 31.4 EXPLAIN ANALYZE Query Plans (§17)
 
-All three plans are real `EXPLAIN (ANALYZE, BUFFERS, VERBOSE)` output captured from the running PostgreSQL 16 engine, after `ANALYZE`. Note that every plan is an `Index Scan` with single-digit `shared hit` buffer counts — the indexes in §15 are doing real work, not sitting idle. The captured figures are 0.060 ms, 0.166 ms, and 0.069 ms respectively; timings vary slightly per capture, and the committed text in `evidence/` is the authoritative copy.
+All three plans are real `EXPLAIN (ANALYZE, BUFFERS, VERBOSE)` output captured from the running PostgreSQL 16 engine, after `ANALYZE`. Note that every plan is an `Index Scan` with single-digit `shared hit` buffer counts — the indexes in §15 are doing real work, not sitting idle. The captured figures are 0.076 ms, 0.284 ms, and 0.055 ms respectively; timings vary slightly per capture, and the committed text in `evidence/` is the authoritative copy.
 
 **Query Plan 1 — Driver Available Queue:**
 
