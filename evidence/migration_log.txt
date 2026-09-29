@@ -1,5 +1,5 @@
 --- MIGRATION RUN LOG ---
-Timestamp: 2026-09-29T17:06:19.511Z
+Timestamp: 2026-09-29T17:36:15.709Z
 Migration: migrations/001_initial_schema.sql
 Target: PostgreSQL 16 on port 15436
 Database: urbanglide_db
@@ -23,6 +23,7 @@ Partial / performance indexes created (7):
   - idx_trips_single_active_rider
   - idx_vehicles_driver_single_active
 
-Lifecycle triggers created (2):
+Lifecycle triggers created (3):
+  - trg_enforce_payment_completion
   - trg_enforce_review_completion
   - trg_enforce_trip_status_transition

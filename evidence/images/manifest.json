@@ -5,7 +5,7 @@
         {
             "source": "evidence/architecture.mermaid",
             "image": "evidence/images/architecture.png",
-            "width": 3292,
+            "width": 3342,
             "height": 4436
         },
         {
@@ -51,10 +51,16 @@
             "height": 993
         },
         {
+            "source": "evidence/invalid_operation_4.txt",
+            "image": "evidence/images/invalid_operation_4.png",
+            "width": 2580,
+            "height": 3468
+        },
+        {
             "source": "evidence/migration_log.txt",
             "image": "evidence/images/migration_log.png",
             "width": 976,
-            "height": 1443
+            "height": 1488
         },
         {
             "source": "evidence/query_1.txt",
@@ -97,6 +103,12 @@
             "image": "evidence/images/state_machine.png",
             "width": 2222,
             "height": 3376
+        },
+        {
+            "source": "evidence/valid_operation_1.txt",
+            "image": "evidence/images/valid_operation_1.png",
+            "width": 2035,
+            "height": 1038
         }
     ]
 }

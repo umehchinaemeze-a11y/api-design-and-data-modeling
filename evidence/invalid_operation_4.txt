@@ -1,0 +1,73 @@
+--- INVALID OPERATION 4: Payment for Non-Completed Trip ---
+Requirement: FR-11 (A payment can only be captured for a completed trip)
+Enforced by: trg_enforce_payment_completion (BEFORE INSERT ON payments)
+Status coverage: ACCEPTED, CANCELLED, IN_PROGRESS, REQUESTED
+
+SQL ATTEMPTED (one insert per non-terminal status):
+-- trip status: REQUESTED
+    INSERT INTO payments (trip_id, amount_minor, currency, status, provider_reference, payment_method)
+    VALUES (
+      '44444444-4444-4444-a444-000000000216',
+      350000,
+      'NGN',
+      'COMPLETED',
+      'proof_reject_payment_requested',
+      'CARD'
+    );
+  
+
+    -- trip status: ACCEPTED
+    INSERT INTO payments (trip_id, amount_minor, currency, status, provider_reference, payment_method)
+    VALUES (
+      '44444444-4444-4444-a444-000000000221',
+      350000,
+      'NGN',
+      'COMPLETED',
+      'proof_reject_payment_accepted',
+      'CARD'
+    );
+  
+
+    -- trip status: IN_PROGRESS
+    INSERT INTO payments (trip_id, amount_minor, currency, status, provider_reference, payment_method)
+    VALUES (
+      '44444444-4444-4444-a444-000000000222',
+      350000,
+      'NGN',
+      'COMPLETED',
+      'proof_reject_payment_in_progress',
+      'CARD'
+    );
+  
+
+    -- trip status: CANCELLED
+    INSERT INTO payments (trip_id, amount_minor, currency, status, provider_reference, payment_method)
+    VALUES (
+      '44444444-4444-4444-a444-000000000201',
+      350000,
+      'NGN',
+      'COMPLETED',
+      'proof_reject_payment_cancelled',
+      'CARD'
+    );
+
+DATABASE ENGINE RESPONSE:
+  [trip status REQUESTED] 44444444-4444-4444-a444-000000000216
+    Error Message: Payments are only permitted for COMPLETED trips. Current status of trip 44444444-4444-4444-a444-000000000216 is REQUESTED
+    PostgreSQL SQLSTATE: 23514 (check_violation raised by enforce_payment_completion trigger)
+
+  [trip status ACCEPTED] 44444444-4444-4444-a444-000000000221
+    Error Message: Payments are only permitted for COMPLETED trips. Current status of trip 44444444-4444-4444-a444-000000000221 is ACCEPTED
+    PostgreSQL SQLSTATE: 23514 (check_violation raised by enforce_payment_completion trigger)
+
+  [trip status IN_PROGRESS] 44444444-4444-4444-a444-000000000222
+    Error Message: Payments are only permitted for COMPLETED trips. Current status of trip 44444444-4444-4444-a444-000000000222 is IN_PROGRESS
+    PostgreSQL SQLSTATE: 23514 (check_violation raised by enforce_payment_completion trigger)
+
+  [trip status CANCELLED] 44444444-4444-4444-a444-000000000201
+    Error Message: Payments are only permitted for COMPLETED trips. Current status of trip 44444444-4444-4444-a444-000000000201 is CANCELLED
+    PostgreSQL SQLSTATE: 23514 (check_violation raised by enforce_payment_completion trigger)
+
+Leak check: SELECT count(*) FROM payments WHERE provider_reference LIKE 'proof_reject_payment_%'
+  Result: 0 (no payment row was created by any rejected attempt)
+Verdict: REJECTED AS EXPECTED (PASS)

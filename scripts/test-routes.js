@@ -158,7 +158,7 @@ async function main() {
     }
     {
         const r = await call('POST', `/trips/${payable}/payment`, { amountMinor: 3450, currency: 'USD', providerReference: 'ch_elig_requested' });
-        check('payment on REQUESTED trip -> 409 TRIP_NOT_COMPLETED (API pre-check, no payment trigger in schema)',
+        check('payment on REQUESTED trip -> 409 TRIP_NOT_COMPLETED (API pre-check; trg_enforce_payment_completion is the DB backstop)',
             r.status === 409 && r.body?.error?.code === 'TRIP_NOT_COMPLETED', `status=${r.status} body=${JSON.stringify(r.body)}`);
     }
     {

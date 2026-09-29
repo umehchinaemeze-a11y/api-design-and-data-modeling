@@ -128,11 +128,14 @@ async function runAllProofs() {
     // 5. Run Query Plans
     await runExplainPlans();
 
-    // 6. Run Three Invalid Invariants
+    // 6. Run Invariant Proofs (4 rejections + 1 acceptance control)
     const invariantResults = await runInvalidInvariantTests();
     const allInvariantsPassed = invariantResults.every(r => r.passed);
     if (!allInvariantsPassed) {
-      throw new Error('Not all invalid invariant tests passed.');
+      throw new Error('Not all invariant proofs passed.');
+    }
+    for (const r of invariantResults) {
+      console.log(`   [PROOF ${r.testNumber}] ${r.passed ? 'PASS' : 'FAIL'} - ${r.title}`);
     }
 
     console.log('\n================================================================');

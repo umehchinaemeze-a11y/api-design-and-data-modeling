@@ -1,0 +1,19 @@
+--- VALID OPERATION 1: Payment for a Completed Trip ---
+Requirement: FR-11 (A payment can only be captured for a completed trip)
+Purpose: prove trg_enforce_payment_completion is not over-broad. A COMPLETED trip
+         must still accept a payment, and the normal settlement lifecycle must
+         remain possible after the trigger was added.
+Target Trip: 99999999-9999-4999-a999-0000000000ff (status: COMPLETED)
+
+SQL ATTEMPTED:
+INSERT INTO payments (trip_id, amount_minor, currency, status, provider_reference, payment_method)
+    VALUES ('99999999-9999-4999-a999-0000000000ff', 350000, 'NGN', 'PENDING', 'proof_valid_payment', 'CARD');
+    UPDATE payments SET status = 'COMPLETED', paid_at = NOW() WHERE provider_reference = 'proof_valid_payment';
+    UPDATE payments SET status = 'REFUNDED' WHERE provider_reference = 'proof_valid_payment';
+
+DATABASE ENGINE RESPONSE:
+  INSERT (PENDING capture)  -> accepted
+  UPDATE (-> COMPLETED)     -> accepted
+  UPDATE (-> REFUNDED)      -> accepted
+  Final status read back    -> REFUNDED
+Verdict: ACCEPTED AS EXPECTED (PASS)

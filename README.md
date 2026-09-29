@@ -94,10 +94,11 @@ This repository is an architectural proof and design deliverable. The implementa
 | **FR-08** | Money must be exact without precision loss | BigInt minor units + ISO 4217 currency | `trips.fare_amount_minor BIGINT`, `payments.amount_minor BIGINT` | Schema definition & payment test |
 | **FR-09** | Reviews allowed only after trip is completed | PostgreSQL Validation Trigger checking Trip status | `trg_enforce_review_completion` | Invalid Test #3 (`23514`) |
 | **FR-10** | At most one review per trip | Unique constraint on `trip_id` | `reviews.trip_id UNIQUE` | Schema definition |
+| **FR-11** | A payment may only be captured for a completed trip | PostgreSQL Validation Trigger checking Trip status, plus an API pre-check for a precise client error | `trg_enforce_payment_completion` | Invalid Test #4 (`23514`), Valid Test #5 |
 | **NFR-01** | Unpredictable, non-sequential IDs | UUID primary keys generated via `gen_random_uuid()` | All tables: `id UUID PRIMARY KEY DEFAULT gen_random_uuid()` | Schema definition |
-| **NFR-06** | Sub-millisecond lookup for active rider trip | Partial unique index on `(rider_id)` restricted to active statuses | `idx_trips_single_active_rider` | Query Plan #3 (0.060 ms) |
-| **NFR-06** | High performance driver queue lookup | Partial index on `(requested_at DESC)` | `idx_trips_driver_available_queue` | Query Plan #1 (0.070 ms) |
-| **NFR-06** | Fast rider history joined to payment status | Partial index on `(rider_id, completed_at DESC)` where `COMPLETED` | `idx_trips_rider_completed` | Query Plan #2 (0.125 ms) |
+| **NFR-06** | Sub-millisecond lookup for active rider trip | Partial unique index on `(rider_id)` restricted to active statuses | `idx_trips_single_active_rider` | Query Plan #3 (0.069 ms) |
+| **NFR-06** | High performance driver queue lookup | Partial index on `(requested_at DESC)` | `idx_trips_driver_available_queue` | Query Plan #1 (0.060 ms) |
+| **NFR-06** | Fast rider history joined to payment status | Partial index on `(rider_id, completed_at DESC)` where `COMPLETED` | `idx_trips_rider_completed` | Query Plan #2 (0.166 ms) |
 
 ---
 
@@ -599,6 +600,8 @@ EXECUTE FUNCTION enforce_trip_status_transition();
 | `trips` | `trg_enforce_trip_status_transition` | `TRIGGER` | Enforces acyclic, non-reversible lifecycle state machine |
 | `payments` | `payments_trip_id_key` | `UNIQUE(trip_id)` | Exactly one payment record per trip |
 | `payments` | `payments_provider_reference_key` | `UNIQUE(provider_reference)` | Idempotency guard for payment gateway charges |
+| `payments` | `payments_trip_id_fkey` | `FOREIGN KEY` → `trips(id)` `ON DELETE RESTRICT` | Payment cannot outlive or precede its trip record |
+| `payments` | `trg_enforce_payment_completion` | `TRIGGER` (`BEFORE INSERT`) | Prevents payment insertion unless trip is `COMPLETED` |
 | `reviews` | `reviews_trip_id_key` | `UNIQUE(trip_id)` | Exactly zero or one review per completed trip |
 | `reviews` | `reviews_rating_check` | `CHECK` | Rating must be an integer between 1 and 5 |
 | `reviews` | `trg_enforce_review_completion` | `TRIGGER` | Prevents review insertion unless trip is `COMPLETED` |
@@ -617,13 +620,29 @@ EXECUTE FUNCTION enforce_trip_status_transition();
 | `payments` | `payments_currency_check` | `CHECK` | `length(currency) = 3` |
 | `vehicles` | `vehicles_year_check` | `CHECK` | Model year between 2005 and 2030 |
 
-> **Note on the one rule that is not a trigger.** The schema has no trigger on
-> `payments`. The rule that a payment may only be captured for a `COMPLETED`
-> trip is therefore evaluated in the API layer
-> (`scripts/dev.js`, `POST /api/v1/trips/:id/payment`) rather than by the engine.
-> This is a deliberate, documented gap: adding a third trigger would extend the
-> constraint inventory beyond what §14 and the ERD describe. The review
-> equivalent *is* engine-enforced, by `trg_enforce_review_completion`.
+> **Payment eligibility is enforced twice, on purpose (defence in depth).**
+> The rule "a payment may only be captured for a `COMPLETED` trip" is enforced
+> at **both** layers:
+>
+> | Layer | Mechanism | Role |
+> | :--- | :--- | :--- |
+> | **Database** | `trg_enforce_payment_completion` — `BEFORE INSERT ON payments`, SQLSTATE `23514` | **Authoritative.** Holds for direct SQL, `psql`, a background job, a future service, or any buggy caller that bypasses HTTP entirely. |
+> | **API** | `scripts/dev.js`, `POST /api/v1/trips/:id/payment` | **Client-facing convenience.** Pre-checks the trip status so it can return a precise `409 TRIP_NOT_COMPLETED` naming the offending status, instead of a generic `400`. |
+>
+> The API pre-check is *not* the security boundary; the trigger is. The server
+> still handles the trigger's `23514` explicitly — it re-reads the trip status in
+> the error path and returns `409` rather than `400`, so a trip cancelled between
+> the pre-check `SELECT` and the `INSERT` still reports the correct status.
+>
+> `BEFORE INSERT` (rather than `INSERT OR UPDATE`) is sufficient and provably
+> complete: `trg_enforce_trip_status_transition` already freezes a trip once it
+> reaches `COMPLETED`, so a trip that was `COMPLETED` at insert time can never
+> become ineligible afterwards. Re-pointing an existing payment is independently
+> blocked by `payments_trip_id_key` (`UNIQUE`) and `ON DELETE RESTRICT`.
+>
+> Proof: `evidence/invalid_operation_4.txt` (all four non-terminal statuses
+> rejected, zero rows leaked) and `evidence/valid_operation_1.txt` (a `COMPLETED`
+> trip still accepts a payment, and `PENDING → COMPLETED → REFUNDED` still works).
 
 ---
 
@@ -802,28 +821,28 @@ files.
 ### Query Plan 1: Driver Available Queue
 Target index: `idx_trips_driver_available_queue`
 ```
-Limit  (cost=0.13..8.15 rows=1 width=99) (actual time=0.020..0.023 rows=5 loops=1)
+Limit  (cost=0.13..8.15 rows=1 width=99) (actual time=0.021..0.024 rows=5 loops=1)
   Output: id, pickup_address, destination_address, fare_amount_minor, currency, requested_at
   Buffers: shared hit=2
-  ->  Index Scan using idx_trips_driver_available_queue on public.trips  (cost=0.13..8.15 rows=1 width=99) (actual time=0.019..0.021 rows=5 loops=1)
+  ->  Index Scan using idx_trips_driver_available_queue on public.trips  (cost=0.13..8.15 rows=1 width=99) (actual time=0.020..0.023 rows=5 loops=1)
         Output: id, pickup_address, destination_address, fare_amount_minor, currency, requested_at
         Buffers: shared hit=2
 Planning Time: 0.115 ms
-Execution Time: 0.070 ms
+Execution Time: 0.060 ms
 ```
-- **Interpretation:** The optimizer utilizes an `Index Scan` on `idx_trips_driver_available_queue`. Because the index already stores rows ordered by `requested_at DESC`, PostgreSQL reads 5 tuples directly off the B-Tree leaf with **zero sort overhead** in **0.070 milliseconds**, touching only 2 shared buffers.
+- **Interpretation:** The optimizer utilizes an `Index Scan` on `idx_trips_driver_available_queue`. Because the index already stores rows ordered by `requested_at DESC`, PostgreSQL reads 5 tuples directly off the B-Tree leaf with **zero sort overhead** in **0.060 milliseconds**, touching only 2 shared buffers.
 
 ### Query Plan 2: Rider Completed Trip History
 Target index: `idx_trips_rider_completed` — Rider: Amara Okafor (`11111111-1111-4111-a111-000000000001`)
 ```
-Limit  (cost=0.29..17.11 rows=5 width=159) (actual time=0.039..0.052 rows=5 loops=1)
+Limit  (cost=0.29..17.11 rows=5 width=159) (actual time=0.032..0.045 rows=5 loops=1)
   Output: t.id, t.status, t.fare_amount_minor, t.currency, t.driver_name_snapshot, t.vehicle_description_snapshot, t.pickup_address, t.destination_address, t.completed_at, p.status
   Buffers: shared hit=13
-  ->  Nested Loop Left Join  (cost=0.29..67.56 rows=20 width=159) (actual time=0.037..0.050 rows=5 loops=1)
+  ->  Nested Loop Left Join  (cost=0.29..67.56 rows=20 width=159) (actual time=0.031..0.043 rows=5 loops=1)
         Output: t.id, t.status, t.fare_amount_minor, t.currency, t.driver_name_snapshot, t.vehicle_description_snapshot, t.pickup_address, t.destination_address, t.completed_at, p.status
         Inner Unique: true
         Buffers: shared hit=13
-        ->  Index Scan using idx_trips_rider_completed on public.trips t  (cost=0.14..40.30 rows=20 width=155) (actual time=0.021..0.026 rows=5 loops=1)
+        ->  Index Scan using idx_trips_rider_completed on public.trips t  (cost=0.14..40.30 rows=20 width=155) (actual time=0.017..0.020 rows=5 loops=1)
               Index Cond: (t.rider_id = '11111111-1111-4111-a111-000000000001'::uuid)
               Buffers: shared hit=3
         ->  Index Scan using payments_trip_id_key on public.payments p  (cost=0.14..1.36 rows=1 width=20) (actual time=0.003..0.003 rows=1 loops=5)
@@ -831,25 +850,25 @@ Limit  (cost=0.29..17.11 rows=5 width=159) (actual time=0.039..0.052 rows=5 loop
               Buffers: shared hit=10
 Planning:
   Buffers: shared hit=6
-Planning Time: 0.573 ms
-Execution Time: 0.125 ms
+Planning Time: 0.504 ms
+Execution Time: 0.166 ms
 ```
-- **Interpretation:** Clean nested loop with `idx_trips_rider_completed` followed by an index scan on the `payments_trip_id_key` unique index. Total execution time is **0.125 ms** with 13 shared buffer hits and 0 disk reads. Both sides of the join are index-driven, so no sequential scan appears anywhere in the plan.
+- **Interpretation:** Clean nested loop with `idx_trips_rider_completed` followed by an index scan on the `payments_trip_id_key` unique index. Total execution time is **0.166 ms** with 13 shared buffer hits and 0 disk reads. Both sides of the join are index-driven, so no sequential scan appears anywhere in the plan.
 
 ### Query Plan 3: Rider Active Trip Lookup
 Target index: `idx_trips_single_active_rider` — Rider: Amara Okafor (`11111111-1111-4111-a111-000000000001`)
 ```
-Limit  (cost=0.13..8.15 rows=1 width=50) (actual time=0.028..0.029 rows=1 loops=1)
+Limit  (cost=0.13..8.15 rows=1 width=50) (actual time=0.031..0.032 rows=1 loops=1)
   Output: id, status, driver_name_snapshot, fare_amount_minor, requested_at
   Buffers: shared hit=2
-  ->  Index Scan using idx_trips_single_active_rider on public.trips  (cost=0.13..8.15 rows=1 width=50) (actual time=0.026..0.026 rows=1 loops=1)
+  ->  Index Scan using idx_trips_single_active_rider on public.trips  (cost=0.13..8.15 rows=1 width=50) (actual time=0.029..0.030 rows=1 loops=1)
         Output: id, status, driver_name_snapshot, fare_amount_minor, requested_at
         Index Cond: (trips.rider_id = '11111111-1111-4111-a111-000000000001'::uuid)
         Buffers: shared hit=2
-Planning Time: 0.147 ms
-Execution Time: 0.060 ms
+Planning Time: 0.198 ms
+Execution Time: 0.069 ms
 ```
-- **Interpretation:** The same partial unique index that enforces FR-04 at write time also serves the read path, completing in **0.060 ms** with a single buffer hit. The index is simultaneously a correctness mechanism and a performance asset.
+- **Interpretation:** The same partial unique index that enforces FR-04 at write time also serves the read path, completing in **0.069 ms** with a single buffer hit. The index is simultaneously a correctness mechanism and a performance asset.
 
 ![EXPLAIN ANALYZE query plan 1](evidence/images/explain_query_1.png)
 
@@ -1072,7 +1091,7 @@ All error responses adhere to a consistent, predictable JSON envelope:
 | `POST /api/v1/trips/:id/accept` | Assign driver | Yes | Natural state gate: Fails with `409 Conflict` if status is no longer `REQUESTED`. |
 | `POST /api/v1/trips/:id/start` | Begin transit | Yes | Natural state gate: Fails with `409 Conflict` if status is no longer `ACCEPTED`. |
 | `POST /api/v1/trips/:id/complete` | Conclude ride | Yes | Natural state gate: Terminal transition enforced by DB trigger. |
-| `POST /api/v1/trips/:id/payment` | Charge card | **CRITICAL** | Gateway token reference enforced by `UNIQUE(provider_reference)` and `UNIQUE(trip_id)`. |
+| `POST /api/v1/trips/:id/payment` | Charge card | **CRITICAL** | Gateway token reference enforced by `UNIQUE(provider_reference)` and `UNIQUE(trip_id)`; eligibility gated by `trg_enforce_payment_completion` plus an API pre-check (`409 TRIP_NOT_COMPLETED`). |
 | `POST /api/v1/trips/:id/reviews` | Post review | Yes | Enforced by `UNIQUE(trip_id)` on `reviews`. Duplicate submission returns `409 Conflict`. |
 
 ---
@@ -1198,19 +1217,23 @@ If the platform added a bidirectional peer-to-peer VoIP audio calling feature or
 
 ## 26. Invalid-State Database Proofs
 
-All three invalid operations were executed against live PostgreSQL 16 and successfully rejected:
+Four invalid operations are executed against live PostgreSQL 16 and rejected by
+the engine. A fifth, **valid** operation is run as a control to prove the new
+payment gate is not over-broad. The text below mirrors the committed captures in
+`evidence/invalid_operation_*.txt` and `evidence/valid_operation_1.txt`; those
+files are the authoritative copy.
 
 ### Invalid State 1: Multiple Active Trips for One Rider
-- **Attempted Action:** Inserting a second `REQUESTED` trip for rider `Amara Okafor` while she already had an active `ACCEPTED` trip.
+- **Attempted Action:** Inserting a second `REQUESTED` trip for rider `Amara Okafor` while she already had an active trip.
 - **Database Engine Response:**
   ```
   PostgreSQL SQLSTATE: 23505 (unique_violation)
   Constraint: idx_trips_single_active_rider
-  Detail: Key (rider_id)=(7aece9ab-255e-40dc-ab02-f44431943d81) already exists.
   Verdict: REJECTED BY DATABASE ENGINE (PASS)
   ```
+- **Capture:** `evidence/invalid_operation_1.txt`
 
-### Invalid State 2: Forbidden State Transition (`COMPLETED` $\rightarrow$ `IN_PROGRESS`)
+### Invalid State 2: Forbidden State Transition (`COMPLETED` → `IN_PROGRESS`)
 - **Attempted Action:** Updating a completed trip back to `IN_PROGRESS`.
 - **Database Engine Response:**
   ```
@@ -1219,6 +1242,7 @@ All three invalid operations were executed against live PostgreSQL 16 and succes
   Message: Invalid trip state transition: COMPLETED trips cannot transition to IN_PROGRESS
   Verdict: REJECTED BY DATABASE ENGINE (PASS)
   ```
+- **Capture:** `evidence/invalid_operation_2.txt`
 
 ### Invalid State 3: Premature Review for Incomplete Trip
 - **Attempted Action:** Inserting a review for a trip currently in `IN_PROGRESS` state.
@@ -1226,9 +1250,40 @@ All three invalid operations were executed against live PostgreSQL 16 and succes
   ```
   PostgreSQL SQLSTATE: 23514 (check_violation)
   Trigger: trg_enforce_review_completion
-  Message: Reviews are only permitted for COMPLETED trips. Current status of trip 3f1a9b86-... is IN_PROGRESS
+  Message: Reviews are only permitted for COMPLETED trips. Current status of trip <uuid> is IN_PROGRESS
   Verdict: REJECTED BY DATABASE ENGINE (PASS)
   ```
+- **Capture:** `evidence/invalid_operation_3.txt`
+
+### Invalid State 4: Payment for a Non-Completed Trip
+- **Attempted Action:** Inserting a `payments` row for one trip in each non-terminal status — `REQUESTED`, `ACCEPTED`, `IN_PROGRESS` and `CANCELLED`.
+- **Database Engine Response (one rejection per status):**
+  ```
+  PostgreSQL SQLSTATE: 23514 (check_violation)
+  Trigger: trg_enforce_payment_completion
+  Message: Payments are only permitted for COMPLETED trips. Current status of trip <uuid> is REQUESTED | ACCEPTED | IN_PROGRESS | CANCELLED
+  Leak check: SELECT count(*) FROM payments WHERE provider_reference LIKE 'proof_reject_payment_%'  --  0
+  Verdict: REJECTED BY DATABASE ENGINE (PASS)
+  ```
+  The leak check matters as much as the error: it proves the trigger is a
+  `BEFORE INSERT` gate, so no orphaned payment row survives a rejected attempt.
+- **Capture:** `evidence/invalid_operation_4.txt`
+
+### Valid State 5: Payment for a Completed Trip (control)
+
+The complementary control proving the new gate did not break legitimate
+settlement. A `COMPLETED` trip accepts a payment, and the normal
+`PENDING → COMPLETED → REFUNDED` lifecycle still succeeds.
+
+```
+INSERT (PENDING capture)  -> accepted
+UPDATE (-> COMPLETED)     -> accepted
+UPDATE (-> REFUNDED)      -> accepted
+Final status read back    -> REFUNDED
+Verdict: ACCEPTED AS EXPECTED (PASS)
+```
+
+- **Capture:** `evidence/valid_operation_1.txt`
 
 ---
 
@@ -1241,7 +1296,16 @@ All three invalid operations were executed against live PostgreSQL 16 and succes
 ### The canonical database target
 
 Every script, migration, and proof in this repository targets exactly one
-PostgreSQL instance. There is no second schema and no second database.
+PostgreSQL instance. There is no second schema definition and no second
+connection default anywhere in the code.
+
+> **If you inspect the container directly, you may also see a legacy
+> `rideflow` database.** It is left over from before this consolidation, it
+> holds an older schema that does *not* match the documented migration, and
+> **nothing in this repository reads from or writes to it** — no script, no
+> test, and no `PG*` default. It is inert. It can be dropped safely with
+> `DROP DATABASE rideflow;` if you want a clean container. The canonical
+> database is the only one that produces the evidence in `evidence/`.
 
 | Setting | Value | Defined in |
 | :--- | :--- | :--- |
@@ -1440,7 +1504,7 @@ The renderer fails loudly rather than emitting a bad image. Per file it asserts 
 
 | Source | Image | Pixels |
 | --- | --- | --- |
-| `evidence/architecture.mermaid` | `evidence/images/architecture.png` | 3292 × 4436 |
+| `evidence/architecture.mermaid` | `evidence/images/architecture.png` | 3342 × 4436 |
 | `evidence/er_diagram.mermaid` | `evidence/images/er_diagram.png` | 1882 × 6004 |
 | `evidence/state_machine.mermaid` | `evidence/images/state_machine.png` | 2222 × 3376 |
 
@@ -1486,7 +1550,7 @@ The renderer fails loudly rather than emitting a bad image. Per file it asserts 
 
 ### 31.4 EXPLAIN ANALYZE Query Plans (§17)
 
-All three plans are real `EXPLAIN (ANALYZE, BUFFERS, VERBOSE)` output captured from the running PostgreSQL 16 engine, after `ANALYZE`. Note that every plan is an `Index Scan` with single-digit `shared hit` buffer counts — the indexes in §15 are doing real work, not sitting idle. The captured figures are 0.070 ms, 0.125 ms, and 0.060 ms respectively; timings vary slightly per capture, and the committed text in `evidence/` is the authoritative copy.
+All three plans are real `EXPLAIN (ANALYZE, BUFFERS, VERBOSE)` output captured from the running PostgreSQL 16 engine, after `ANALYZE`. Note that every plan is an `Index Scan` with single-digit `shared hit` buffer counts — the indexes in §15 are doing real work, not sitting idle. The captured figures are 0.060 ms, 0.166 ms, and 0.069 ms respectively; timings vary slightly per capture, and the committed text in `evidence/` is the authoritative copy.
 
 **Query Plan 1 — Driver Available Queue:**
 
@@ -1515,3 +1579,15 @@ These are not application-layer exceptions. Each one is the PostgreSQL engine re
 **Invalid Operation 3 — a review for a trip that has not been completed:**
 
 ![Invalid operation 3](evidence/images/invalid_operation_3.png)
+
+**Invalid Operation 4 — a payment for any non-completed trip (`REQUESTED`, `ACCEPTED`, `IN_PROGRESS`, `CANCELLED`), with a leak check proving no row was inserted:**
+
+![Invalid operation 4](evidence/images/invalid_operation_4.png)
+
+### 31.6 Valid Operation Accepted by the Engine (Control for §26)
+
+The control that proves the new payment gate is not over-broad: a `COMPLETED` trip accepts a payment, and `PENDING → COMPLETED → REFUNDED` all succeed.
+
+**Valid Operation 1 — payment settlement for a completed trip:**
+
+![Valid operation 1](evidence/images/valid_operation_1.png)

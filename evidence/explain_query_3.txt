@@ -2,12 +2,12 @@
 Target Index: idx_trips_single_active_rider
 Rider: Amara Okafor (11111111-1111-4111-a111-000000000001)
 
-Limit  (cost=0.13..8.15 rows=1 width=50) (actual time=0.028..0.029 rows=1 loops=1)
+Limit  (cost=0.13..8.15 rows=1 width=50) (actual time=0.031..0.032 rows=1 loops=1)
   Output: id, status, driver_name_snapshot, fare_amount_minor, requested_at
   Buffers: shared hit=2
-  ->  Index Scan using idx_trips_single_active_rider on public.trips  (cost=0.13..8.15 rows=1 width=50) (actual time=0.026..0.026 rows=1 loops=1)
+  ->  Index Scan using idx_trips_single_active_rider on public.trips  (cost=0.13..8.15 rows=1 width=50) (actual time=0.029..0.030 rows=1 loops=1)
         Output: id, status, driver_name_snapshot, fare_amount_minor, requested_at
         Index Cond: (trips.rider_id = '11111111-1111-4111-a111-000000000001'::uuid)
         Buffers: shared hit=2
-Planning Time: 0.147 ms
-Execution Time: 0.060 ms
+Planning Time: 0.198 ms
+Execution Time: 0.069 ms

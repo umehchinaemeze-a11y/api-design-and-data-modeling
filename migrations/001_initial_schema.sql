@@ -20,11 +20,15 @@ BEGIN
   IF to_regclass('public.reviews') IS NOT NULL THEN
     DROP TRIGGER IF EXISTS trg_enforce_review_completion ON reviews;
   END IF;
+  IF to_regclass('public.payments') IS NOT NULL THEN
+    DROP TRIGGER IF EXISTS trg_enforce_payment_completion ON payments;
+  END IF;
 END;
 $$;
 
 DROP FUNCTION IF EXISTS enforce_trip_status_transition();
 DROP FUNCTION IF EXISTS enforce_review_completion();
+DROP FUNCTION IF EXISTS enforce_payment_completion();
 
 -- Drop existing tables in reverse dependency order
 DROP TABLE IF EXISTS reviews CASCADE;
@@ -323,3 +327,49 @@ CREATE TRIGGER trg_enforce_review_completion
 BEFORE INSERT ON reviews
 FOR EACH ROW
 EXECUTE FUNCTION enforce_review_completion();
+
+-- ============================================================================
+-- TRIGGER: payment completion gate
+-- ============================================================================
+-- Guarantees that a payment can only ever be created for a COMPLETED trip.
+--
+-- INSERT-only is sufficient here, and is deliberately the smallest mechanism
+-- that is also provably complete: trg_enforce_trip_status_transition already
+-- freezes a trip once it reaches COMPLETED, so a trip that was COMPLETED at
+-- insert time can never become ineligible afterwards. Re-pointing an existing
+-- payment at a different trip is independently blocked by
+-- payments_trip_id_key (UNIQUE) and by trips(id) ON DELETE RESTRICT.
+--
+-- DEFENCE IN DEPTH. The API (POST /api/v1/trips/:id/payment) also pre-checks
+-- eligibility, but only so it can return a precise client-facing 409 naming
+-- the offending status. This trigger is the authoritative half: it holds for
+-- direct SQL, psql, a future service, a background job, or any buggy caller
+-- that bypasses the HTTP layer entirely.
+CREATE OR REPLACE FUNCTION enforce_payment_completion()
+RETURNS TRIGGER AS $$
+DECLARE
+  v_trip_status trip_status_enum;
+BEGIN
+  SELECT status
+  INTO v_trip_status
+  FROM trips
+  WHERE id = NEW.trip_id;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Cannot pay for non-existent trip %', NEW.trip_id
+      USING ERRCODE = '23503'; -- foreign_key_violation
+  END IF;
+
+  IF v_trip_status != 'COMPLETED' THEN
+    RAISE EXCEPTION 'Payments are only permitted for COMPLETED trips. Current status of trip % is %', NEW.trip_id, v_trip_status
+      USING ERRCODE = '23514'; -- check_violation
+  END IF;
+
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_enforce_payment_completion
+BEFORE INSERT ON payments
+FOR EACH ROW
+EXECUTE FUNCTION enforce_payment_completion();

@@ -11,11 +11,16 @@ const { TARGET } = require('./lib/target');
  *  1. The trip lifecycle is enforced by trg_enforce_trip_status_transition, which
  *     raises SQLSTATE 23514. This server therefore maps 23514 on a trips UPDATE to
  *     409 INVALID_STATE_TRANSITION rather than filtering on a custom P0001.
- *  2. The canonical schema has no stamping trigger and no payment trigger, so this
- *     server writes accepted_at / started_at / completed_at / cancelled_at itself
- *     (chk_trips_timestamps requires them) and checks payment eligibility before
- *     inserting. The rule that a payment is only captured for a COMPLETED trip is
- *     the one lifecycle rule NOT enforced by a database trigger in this schema.
+ *  2. The canonical schema has no stamping trigger, so this server writes
+ *     accepted_at / started_at / completed_at / cancelled_at itself
+ *     (chk_trips_timestamps requires them).
+ *  3. Payment eligibility is enforced TWICE on purpose:
+ *       - trg_enforce_payment_completion is the authoritative gate. It rejects any
+ *         INSERT INTO payments whose trip is not COMPLETED, with SQLSTATE 23514.
+ *       - This server also pre-checks, purely so it can return a precise 409 naming
+ *         the offending status instead of a generic 400.
+ *     The pre-check is a client-facing convenience; the trigger is what makes the
+ *     rule true for direct SQL, psql, a background job, or any future service.
  */
 
 const PORT = process.env.PORT || 3000;
@@ -425,10 +430,10 @@ const server = http.createServer(async (req, res) => {
                 || `auto_${tripId.replace(/-/g, '').slice(0, 16)}_${amountMinor}`;
 
             try {
-                // Eligibility first. payments.status is payment_status_enum, so a settled
-                // capture is written directly as COMPLETED with paid_at set; the canonical
-                // schema has no payment trigger, so the COMPLETED-trip precondition is
-                // evaluated here.
+                // Eligibility first, so the client gets a precise 409 naming the
+                // offending status. trg_enforce_payment_completion independently
+                // enforces the same rule at the database level; this pre-check is
+                // the client-facing half of that defence-in-depth pair.
                 const tripRes = await client.query('SELECT status FROM trips WHERE id = $1', [tripId]);
                 if (tripRes.rows.length === 0) {
                     return sendError(res, 404, 'TRIP_NOT_FOUND', `Trip with id ${tripId} not found.`);
@@ -457,6 +462,17 @@ const server = http.createServer(async (req, res) => {
                     return sendError(res, 409, 'DUPLICATE_PROVIDER_REFERENCE', 'That provider reference is already recorded against another payment.', { providerReference: reference });
                 }
                 if (dbErr.code === '23514') {
+                    // trg_enforce_payment_completion and the two value-domain CHECK
+                    // constraints both surface as 23514. Disambiguate by re-reading the
+                    // trip status rather than by matching on message text, so a trip that
+                    // is cancelled between the pre-check SELECT and this INSERT still
+                    // returns the correct 409 instead of a misleading 400.
+                    const recheck = await client.query('SELECT status FROM trips WHERE id = $1', [tripId]);
+                    if (recheck.rows.length > 0 && recheck.rows[0].status !== 'COMPLETED') {
+                        return sendError(res, 409, 'TRIP_NOT_COMPLETED',
+                            `Cannot capture payment for trip ${tripId}: trip status is ${recheck.rows[0].status}, not COMPLETED.`,
+                            { tripId });
+                    }
                     return sendError(res, 400, 'INVALID_PAYMENT', 'Payment rejected by database validation (amount_minor must be positive, currency must be 3 characters).');
                 }
                 throw dbErr;

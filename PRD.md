@@ -64,6 +64,7 @@ Every architectural entity, constraint, index, API endpoint, and proof query in 
 - **FR-08 (Financial Settlement):** Payments record the finalized transaction with idempotency provider references and minor-unit amounts.
 - **FR-09 (Gated Reviews):** Reviews can only be submitted for `COMPLETED` trips; attempts to review active or cancelled trips are rejected.
 - **FR-10 (Review Cardinality):** Exactly zero or one review can exist for a given trip.
+- **FR-11 (Payment Completion Gating):** A payment can only be captured for a `COMPLETED` trip. Direct inserts against a non-completed trip are rejected by the database engine, not merely by API validation.
 
 ### Non-Functional Requirements (NFR)
 - **NFR-01 (Non-Sequential Identifiers):** All public-facing entity identifiers must be cryptographically unpredictable, non-sequential UUIDs (UUIDv4/UUIDv7) to prevent enumeration attacks.
@@ -101,6 +102,7 @@ To preserve architectural focus and adhere to the proof-layer scope, the followi
 | **FR-08** | Money must be exact without precision loss | BigInt minor units + ISO 4217 currency | `trips.fare_amount_minor BIGINT`, `payments.amount_minor BIGINT` | Schema definition & payment test |
 | **FR-09** | Reviews allowed only after trip is completed | PostgreSQL Validation Trigger checking Trip status on insert | `trg_enforce_review_completion` on `BEFORE INSERT ON reviews` | Invalid Test #3 (Review for `IN_PROGRESS` trip) |
 | **FR-10** | At most one review per trip | Unique constraint on `trip_id` | `reviews.trip_id UNIQUE` | Schema definition |
+| **FR-11** | A payment can only be captured for a completed trip | PostgreSQL Validation Trigger checking Trip status on insert, plus an API pre-check for a precise client-facing error | `trg_enforce_payment_completion` on `BEFORE INSERT ON payments` | Invalid Test #4 (`23514`, all four non-terminal statuses) & Valid Test #5 |
 | **NFR-01** | Unpredictable, non-sequential IDs | UUID primary keys generated via `gen_random_uuid()` | All tables: `id UUID PRIMARY KEY DEFAULT gen_random_uuid()` | Schema definition |
 | **NFR-06** | Sub-millisecond lookup for active rider trip | Partial unique index on `(rider_id)` restricted to active statuses | `idx_trips_single_active_rider` | Query Plan #3 (EXPLAIN ANALYZE) |
 | **NFR-06** | High performance driver queue lookup | Partial index on `(requested_at DESC)` where trip is unassigned | `idx_trips_driver_available_queue` | Query Plan #1 (EXPLAIN ANALYZE) |

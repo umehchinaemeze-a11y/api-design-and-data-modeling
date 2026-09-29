@@ -31,6 +31,7 @@ flowchart TD
             IdxDriverActive["idx_trips_single_active_driver\n(Partial Unique Index)"]
             TrgTransition["trg_enforce_trip_status_transition\n(PL/pgSQL State Guard)"]
             TrgReview["trg_enforce_review_completion\n(PL/pgSQL Completion Guard)"]
+            TrgPayment["trg_enforce_payment_completion\n(PL/pgSQL Completion Guard)"]
         end
     end
 
@@ -52,3 +53,4 @@ flowchart TD
     T_Trips -.->|"Guarded by"| IdxDriverActive
     T_Trips -.->|"Enforced by"| TrgTransition
     T_Reviews -.->|"Enforced by"| TrgReview
+    T_Payments -.->|"Enforced by"| TrgPayment
