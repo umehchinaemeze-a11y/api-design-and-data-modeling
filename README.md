@@ -1297,15 +1297,18 @@ Verdict: ACCEPTED AS EXPECTED (PASS)
 
 Every script, migration, and proof in this repository targets exactly one
 PostgreSQL instance. There is no second schema definition and no second
-connection default anywhere in the code.
+connection default anywhere in the code, and `docker compose up -d` creates
+exactly one database (`urbanglide_db`).
 
-> **If you inspect the container directly, you may also see a legacy
-> `rideflow` database.** It is left over from before this consolidation, it
-> holds an older schema that does *not* match the documented migration, and
-> **nothing in this repository reads from or writes to it** — no script, no
-> test, and no `PG*` default. It is inert. It can be dropped safely with
-> `DROP DATABASE rideflow;` if you want a clean container. The canonical
-> database is the only one that produces the evidence in `evidence/`.
+> **On a container that predates the schema consolidation.** A legacy
+> `rideflow` database may still be present. It holds an older, divergent
+> design — different trigger names (`trg_validate_*` rather than
+> `trg_enforce_*`), `updated_at` triggers this schema does not use, and a
+> `payments` table without `payment_method`. **Nothing in this repository
+> reads from or writes to it**: no script, no test, and no `PG*` default
+> points at it, and it produces none of the evidence in `evidence/`. It is
+> inert. Remove it with `DROP DATABASE rideflow;` to return the container to
+> a single-database state.
 
 | Setting | Value | Defined in |
 | :--- | :--- | :--- |
