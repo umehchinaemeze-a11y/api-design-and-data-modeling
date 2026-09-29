@@ -1380,5 +1380,3 @@ These are not application-layer exceptions. Each one is the PostgreSQL engine re
 **Invalid Operation 3 — a review for a trip that has not been completed:**
 
 ![Invalid operation 3](evidence/images/invalid_operation_3.png)
-#   a p i - d e s i g n - a n d - d a t a - m o d e l i n g  
- 
