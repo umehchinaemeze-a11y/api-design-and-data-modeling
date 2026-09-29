@@ -1,0 +1,96 @@
+{
+    "generatedBy": "scripts/render-evidence.js",
+    "scale": 2,
+    "images": [
+        {
+            "source": "evidence/architecture.mermaid",
+            "image": "evidence/images/architecture.png",
+            "width": 3292,
+            "height": 4436
+        },
+        {
+            "source": "evidence/er_diagram.mermaid",
+            "image": "evidence/images/er_diagram.png",
+            "width": 1882,
+            "height": 6004
+        },
+        {
+            "source": "evidence/explain_query_1.txt",
+            "image": "evidence/images/explain_query_1.png",
+            "width": 2686,
+            "height": 678
+        },
+        {
+            "source": "evidence/explain_query_2.txt",
+            "image": "evidence/images/explain_query_2.png",
+            "width": 3635,
+            "height": 1308
+        },
+        {
+            "source": "evidence/invalid_operation_1.txt",
+            "image": "evidence/images/invalid_operation_1.png",
+            "width": 1719,
+            "height": 1173
+        },
+        {
+            "source": "evidence/invalid_operation_2.txt",
+            "image": "evidence/images/invalid_operation_2.png",
+            "width": 1736,
+            "height": 768
+        },
+        {
+            "source": "evidence/invalid_operation_3.txt",
+            "image": "evidence/images/invalid_operation_3.png",
+            "width": 2492,
+            "height": 993
+        },
+        {
+            "source": "evidence/migration_log.txt",
+            "image": "evidence/images/migration_log.png",
+            "width": 2615,
+            "height": 498
+        },
+        {
+            "source": "evidence/query_1.txt",
+            "image": "evidence/images/query_1.png",
+            "width": 1402,
+            "height": 1803
+        },
+        {
+            "source": "evidence/query_2.txt",
+            "image": "evidence/images/query_2.png",
+            "width": 1262,
+            "height": 2793
+        },
+        {
+            "source": "evidence/query_3.txt",
+            "image": "evidence/images/query_3.png",
+            "width": 1473,
+            "height": 2703
+        },
+        {
+            "source": "evidence/query_4.txt",
+            "image": "evidence/images/query_4.png",
+            "width": 1402,
+            "height": 3963
+        },
+        {
+            "source": "evidence/query_5.txt",
+            "image": "evidence/images/query_5.png",
+            "width": 1244,
+            "height": 2838
+        },
+        {
+            "source": "evidence/seed_log.txt",
+            "image": "evidence/images/seed_log.png",
+            "width": 910,
+            "height": 948
+        },
+        {
+            "source": "evidence/state_machine.mermaid",
+            "image": "evidence/images/state_machine.png",
+            "width": 2222,
+            "height": 3376
+        }
+    ]
+}

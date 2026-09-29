@@ -13,7 +13,9 @@
     "proof:invariants": "tsx src/test-invariants.ts",
     "test": "tsx src/run-all-proofs.ts",
     "test:model": "node scripts/test-model.js",
-    "test:routes": "node scripts/test-routes.js"
+    "test:routes": "node scripts/test-routes.js",
+    "evidence:render": "node scripts/render-evidence.js",
+    "evidence:verify": "node scripts/verify-images.js"
   },
   "dependencies": {
     "pg": "^8.13.1"
@@ -21,6 +23,8 @@
   "devDependencies": {
     "@types/node": "^22.10.1",
     "@types/pg": "^8.11.10",
+    "mermaid": "^12.0.0",
+    "puppeteer-core": "^25.12.0",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   }

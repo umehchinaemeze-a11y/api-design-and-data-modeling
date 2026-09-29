@@ -39,6 +39,7 @@
 28. [Engineering Defence Preparation](#28-engineering-defence-preparation)
 29. [Design Decisions & Trade-offs](#29-design-decisions--trade-offs)
 30. [LinkedIn Technical Case Study](#30-linkedin-technical-case-study)
+31. [Evidence Package — Rendered Proof Images](#31-evidence-package--rendered-proof-images)
 
 ---
 
@@ -1288,5 +1289,96 @@ WHERE status IN ('REQUESTED', 'ACCEPTED', 'IN_PROGRESS');
 
 **Key Engineering Lesson:**  
 Good API design starts before the API exists. Enforce your business invariants at the database layer first, and your application code will never have to apologize for dirty state.
+
+---
+
+## 31. Evidence Package — Rendered Proof Images
+
+Every artifact in `evidence/` is published twice: once as the raw, greppable source (`.txt` / `.mermaid`) and once as a **2× high-resolution PNG** in `evidence/images/`, so the proof can be read without a terminal and without a Mermaid renderer installed.
+
+```bash
+npm run evidence:render    # re-render every evidence file to PNG
+npm run evidence:verify    # decode each PNG and assert it is real, non-blank content
+```
+
+`scripts/render-evidence.js` drives a headless Chromium (Edge/Chrome, resolved from `PUPPETEER_EXECUTABLE_PATH` or the standard install paths) with the Mermaid bundle served from `node_modules` over a short-lived loopback HTTP server. Rendering is fully local and offline.
+
+The renderer fails loudly rather than emitting a bad image. Per file it asserts that no source line is clipped, that the rendered line count matches the source exactly, that no diagram label falls outside the canvas, and that every entity, field, and state label in the Mermaid source actually appears in the rendered SVG. `evidence/images/manifest.json` records the pixel dimensions of every output.
+
+### 31.1 Architecture & Data Model Diagrams
+
+| Source | Image | Pixels |
+| --- | --- | --- |
+| `evidence/architecture.mermaid` | `evidence/images/architecture.png` | 3292 × 4436 |
+| `evidence/er_diagram.mermaid` | `evidence/images/er_diagram.png` | 1882 × 6004 |
+| `evidence/state_machine.mermaid` | `evidence/images/state_machine.png` | 2222 × 3376 |
+
+**System Architecture (§4) — layered ingress, real-time transport, and the declarative invariants guarding storage:**
+
+![UrbanGlide system architecture](evidence/images/architecture.png)
+
+**Entity Relationship Diagram (§6) — six entities, cardinality, and the deliberate denormalized snapshots on `trips`:**
+
+![UrbanGlide entity relationship diagram](evidence/images/er_diagram.png)
+
+**Trip State Machine (§11) — with the transition set the PL/pgSQL trigger refuses to honour:**
+
+![UrbanGlide trip state machine](evidence/images/state_machine.png)
+
+### 31.2 Reproducible Migration & Seed Run
+
+![Database migration log](evidence/images/migration_log.png)
+
+![Database seed log](evidence/images/seed_log.png)
+
+### 31.3 Five Representative Query Results (§16)
+
+**Query 1 — Rider's Active Trip Lookup.** The partial unique index `idx_trips_single_active_rider` guarantees this lookup can return at most one row.
+
+![Query 1 result](evidence/images/query_1.png)
+
+**Query 2 — Driver's Available Pending Queue.** Served by `idx_trips_driver_available_queue`; terminal trips never enter the index.
+
+![Query 2 result](evidence/images/query_2.png)
+
+**Query 3 — Complete Trip Manifest & Financial Audit Trail.** Joins the immutable trip record to its settled payment.
+
+![Query 3 result](evidence/images/query_3.png)
+
+**Query 4 — Rider's Completed Trip History.** Served by `idx_trips_rider_completed`.
+
+![Query 4 result](evidence/images/query_4.png)
+
+**Query 5 — Driver Reputation & Review Feed.** Aggregated ratings with a foreign key into the trips table, so reviews can only exist for trips that really happened.
+
+![Query 5 result](evidence/images/query_5.png)
+
+### 31.4 EXPLAIN ANALYZE Query Plans (§17)
+
+Both plans are real `EXPLAIN (ANALYZE, BUFFERS, VERBOSE)` output captured from the running PostgreSQL 16 engine, after `ANALYZE`. Note that every plan is an `Index Scan` with single-digit `shared hit` buffer counts — the indexes in §15 are doing real work, not sitting idle.
+
+**Query Plan 1 — Driver Available Queue:**
+
+![EXPLAIN ANALYZE query plan 1](evidence/images/explain_query_1.png)
+
+**Query Plan 2 — Rider Completed Trip History (nested loop over two index scans):**
+
+![EXPLAIN ANALYZE query plan 2](evidence/images/explain_query_2.png)
+
+### 31.5 Invalid Operations Rejected by the Engine (§26)
+
+These are not application-layer exceptions. Each one is the PostgreSQL engine refusing to commit, with the SQLSTATE and the constraint that fired.
+
+**Invalid Operation 1 — a second concurrent active trip for the same rider (SQLSTATE `23505`):**
+
+![Invalid operation 1](evidence/images/invalid_operation_1.png)
+
+**Invalid Operation 2 — a forbidden state transition out of a terminal state:**
+
+![Invalid operation 2](evidence/images/invalid_operation_2.png)
+
+**Invalid Operation 3 — a review for a trip that has not been completed:**
+
+![Invalid operation 3](evidence/images/invalid_operation_3.png)
 #   a p i - d e s i g n - a n d - d a t a - m o d e l i n g  
  
