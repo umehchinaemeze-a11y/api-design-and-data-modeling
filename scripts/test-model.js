@@ -63,10 +63,13 @@ async function runTestSuite() {
 
         const triggersRes = await client.query(`
             SELECT tgname FROM pg_trigger
-            WHERE tgname IN ('trg_enforce_trip_status_transition', 'trg_enforce_review_completion')
-              AND NOT tgisinternal;
+            WHERE tgname IN (
+                'trg_enforce_trip_status_transition',
+                'trg_enforce_review_completion',
+                'trg_enforce_payment_completion'
+            ) AND NOT tgisinternal;
         `);
-        assert(triggersRes.rows.length === 2, 'Both lifecycle-enforcement triggers exist in the catalog');
+        assert(triggersRes.rows.length === 3, 'All three lifecycle-enforcement triggers exist in the catalog');
 
         // 2. REFERENTIAL INTEGRITY
         console.log('\nSUITE 2: Foreign Key & Referential Integrity');
@@ -233,6 +236,43 @@ async function runTestSuite() {
             UPDATE riders SET deleted_at = NOW() WHERE id = '${ID.rider(1)}' RETURNING deleted_at;
         `);
         assert(softDelRes.rows[0].deleted_at !== null, 'Soft delete sets deleted_at while preserving trip history');
+
+        // 8. PAYMENT INTEGRITY
+        // Mirrors Suite 3 (monetary bounds) and Suite 6 (completion gating) but
+        // for the payments table and its dedicated trigger (FR-11).
+        console.log('\nSUITE 8: Payment Integrity (amount bounds & completion gate)');
+
+        // Zero-amount payment rejected by the amount_minor > 0 CHECK constraint.
+        // Uses the first COMPLETED trip in the seed so the completion-gate trigger
+        // does not interfere with observing the CHECK violation.
+        try {
+            await client.query(`
+                INSERT INTO payments (trip_id, amount_minor, currency, status, provider_reference, payment_method)
+                VALUES ('${ID.trip(1)}', 0, 'NGN', 'PENDING', 'test_zero_amount_payment', 'CARD');
+            `);
+            assert(false, 'Zero-amount payment rejected', 'Allowed amount_minor = 0 in payments');
+        } catch (err) {
+            assert(
+                err.code === '23514' && /amount_minor/.test(err.message),
+                'Zero-amount payment rejected with CHECK constraint 23514 on amount_minor', err.message
+            );
+        }
+
+        // Payment on a non-COMPLETED trip rejected by trg_enforce_payment_completion.
+        // trip 222 is IN_PROGRESS in the seed — the most representative live status
+        // because it is the furthest along without being terminal.
+        try {
+            await client.query(`
+                INSERT INTO payments (trip_id, amount_minor, currency, status, provider_reference, payment_method)
+                VALUES ('${ID.trip(222)}', 350000, 'NGN', 'PENDING', 'test_payment_not_completed', 'CARD');
+            `);
+            assert(false, 'Payment on non-completed trip rejected', 'Allowed payment for IN_PROGRESS trip');
+        } catch (err) {
+            assert(
+                err.code === '23514' && /Payments are only permitted for COMPLETED trips/.test(err.message),
+                'Payment on IN_PROGRESS trip rejected with trigger SQLSTATE 23514 (trg_enforce_payment_completion)', err.message
+            );
+        }
 
         console.log('\n================================================================');
         console.log(`TEST RESULTS: ${passed} PASSED, ${failed} FAILED`);
