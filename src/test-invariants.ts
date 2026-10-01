@@ -309,7 +309,7 @@ export async function runInvalidInvariantTests(): Promise<InvariantTestResult[]>
     path.join(evidenceDir, 'invalid_operation_4.txt'),
     `--- INVALID OPERATION 4: Payment for Non-Completed Trip ---\n` +
     `Requirement: FR-11 (A payment can only be captured for a completed trip)\n` +
-    `Enforced by: trg_enforce_payment_completion (BEFORE INSERT ON payments)\n` +
+    `Enforced by: trg_enforce_payment_completion (BEFORE INSERT OR UPDATE OF trip_id ON payments)\n` +
     `Status coverage: ${coveredStatuses.join(', ')}\n\n` +
     `SQL ATTEMPTED (one insert per non-terminal status):\n${sqlTest4.trim()}\n\n` +
     `DATABASE ENGINE RESPONSE:\n` +
@@ -334,11 +334,100 @@ export async function runInvalidInvariantTests(): Promise<InvariantTestResult[]>
   });
 
   // --------------------------------------------------------------------------
-  // TEST 5: The gate is not over-broad - a COMPLETED trip must still accept a
+  // TEST 5: An existing payment cannot be re-pointed to a non-COMPLETED trip.
+  // Enforcement: trg_enforce_payment_completion (BEFORE INSERT OR UPDATE OF
+  // trip_id). payments_trip_id_key (UNIQUE) and the foreign key cannot block
+  // this path, so the UPDATE arm is the only thing standing between a settled
+  // payment and a still-open IN_PROGRESS trip.
+  // --------------------------------------------------------------------------
+  console.log('\n--- [TEST 5] Attempt to re-point an existing payment to an IN_PROGRESS trip ---');
+
+  const sourcePayment = (await query(`
+    SELECT p.id, p.trip_id AS from_trip_id
+    FROM payments p
+    JOIN trips t ON t.id = p.trip_id
+    WHERE t.status = 'COMPLETED'
+    ORDER BY p.id
+    LIMIT 1;
+  `))[0];
+
+  const targetInProgressTrip = (await query(`
+    SELECT id, status FROM trips WHERE status = 'IN_PROGRESS' LIMIT 1;
+  `))[0];
+
+  console.log(`Source payment ${sourcePayment.id} (trip ${sourcePayment.from_trip_id}) -> target trip ${targetInProgressTrip.id} (${targetInProgressTrip.status}).`);
+
+  const sqlTest5 = `
+    UPDATE payments
+    SET trip_id = '${targetInProgressTrip.id}'
+    WHERE id = '${sourcePayment.id}';
+  `;
+
+  let test5Passed = false;
+  let test5Error: any = null;
+
+  try {
+    await query(sqlTest5);
+    console.error('❌ ERROR: Database unexpectedly permitted re-pointing a payment to an IN_PROGRESS trip!');
+  } catch (err: any) {
+    test5Error = err;
+    if (err.code === '23514' && err.message.includes('Payments are only permitted for COMPLETED trips')) {
+      console.log('✅ PROOF SUCCESS: PostgreSQL REJECTED payment re-point via trigger with 23514 check_violation:');
+      console.log(`   Message: ${err.message}`);
+      test5Passed = true;
+    } else {
+      console.error('❌ Rejection failed with unexpected error:', err);
+    }
+  }
+
+  // Leak check: the source payment must still reference its original trip.
+  const rePointLeak = (await query(`
+    SELECT trip_id FROM payments WHERE id = '${sourcePayment.id}';
+  `))[0];
+
+  if (rePointLeak.trip_id !== sourcePayment.from_trip_id) {
+    test5Passed = false;
+    console.error(`❌ ERROR: payment ${sourcePayment.id} was left re-pointed to ${rePointLeak.trip_id}.`);
+  } else {
+    console.log(`   Leak check: payment ${sourcePayment.id} still references trip ${sourcePayment.from_trip_id}.`);
+  }
+
+  fs.writeFileSync(
+    path.join(evidenceDir, 'invalid_operation_5.txt'),
+    `--- INVALID OPERATION 5: Payment Re-Pointed to a Non-Completed Trip ---\n` +
+    `Requirement: FR-11 (A payment can only be captured for a completed trip)\n` +
+    `Enforced by: trg_enforce_payment_completion (BEFORE INSERT OR UPDATE OF trip_id ON payments)\n\n` +
+    `Source payment: ${sourcePayment.id} (trip ${sourcePayment.from_trip_id}, COMPLETED)\n` +
+    `Target trip:    ${targetInProgressTrip.id} (${targetInProgressTrip.status})\n\n` +
+    `SQL ATTEMPTED:\n${sqlTest5.trim()}\n\n` +
+    `DATABASE ENGINE RESPONSE:\n` +
+    `Error Message: ${test5Error?.message}\n` +
+    `PostgreSQL SQLSTATE: ${test5Error?.code} (check_violation raised by enforce_payment_completion trigger)\n\n` +
+    `Leak check: SELECT trip_id FROM payments WHERE id = '${sourcePayment.id}'\n` +
+    `  Result: ${rePointLeak.trip_id} (payment still bound to its original COMPLETED trip)\n` +
+    `Verdict: REJECTED AS EXPECTED (PASS)\n`
+  );
+
+  results.push({
+    testNumber: 5,
+    title: 'Payment Re-Pointing to Non-Completed Trip Invariant',
+    expectedState: 'Database rejects UPDATE of payments.trip_id to a non-COMPLETED trip',
+    sqlAttempted: sqlTest5.trim(),
+    errorCaptured: {
+      message: test5Error?.message,
+      code: test5Error?.code,
+      detail: test5Error?.detail,
+      constraint: test5Error?.constraint,
+    },
+    passed: test5Passed,
+  });
+
+  // --------------------------------------------------------------------------
+  // TEST 6: The gate is not over-broad - a COMPLETED trip must still accept a
   // payment, and the legitimate PENDING -> COMPLETED -> REFUNDED settlement
   // lifecycle must remain possible.
   // --------------------------------------------------------------------------
-  console.log('\n--- [TEST 5] Confirming legitimate payment settlement is NOT blocked ---');
+  console.log('\n--- [TEST 6] Confirming legitimate payment settlement is NOT blocked ---');
 
   const validTrip = (await query(`
     INSERT INTO trips (
@@ -362,31 +451,31 @@ export async function runInvalidInvariantTests(): Promise<InvariantTestResult[]>
     RETURNING id, status;
   `))[0];
 
-  const sqlTest5 = `
+  const sqlTest6 = `
     INSERT INTO payments (trip_id, amount_minor, currency, status, provider_reference, payment_method)
     VALUES ('${validTrip.id}', 350000, 'NGN', 'PENDING', 'proof_valid_payment', 'CARD');
     UPDATE payments SET status = 'COMPLETED', paid_at = NOW() WHERE provider_reference = 'proof_valid_payment';
     UPDATE payments SET status = 'REFUNDED' WHERE provider_reference = 'proof_valid_payment';
   `;
 
-  let test5Passed = false;
-  let test5Error: any = null;
-  let test5FinalStatus = 'unknown';
+  let test6Passed = false;
+  let test6Error: any = null;
+  let test6FinalStatus = 'unknown';
 
   try {
     await query(`INSERT INTO payments (trip_id, amount_minor, currency, status, provider_reference, payment_method)
                 VALUES ('${validTrip.id}', 350000, 'NGN', 'PENDING', 'proof_valid_payment', 'CARD');`);
     await query(`UPDATE payments SET status = 'COMPLETED', paid_at = NOW() WHERE provider_reference = 'proof_valid_payment';`);
     await query(`UPDATE payments SET status = 'REFUNDED' WHERE provider_reference = 'proof_valid_payment';`);
-    test5FinalStatus = (await query(`SELECT status FROM payments WHERE provider_reference = 'proof_valid_payment';`))[0].status;
-    test5Passed = test5FinalStatus === 'REFUNDED';
-    if (test5Passed) {
+    test6FinalStatus = (await query(`SELECT status FROM payments WHERE provider_reference = 'proof_valid_payment';`))[0].status;
+    test6Passed = test6FinalStatus === 'REFUNDED';
+    if (test6Passed) {
       console.log('✅ PROOF SUCCESS: PostgreSQL ACCEPTED payment for a COMPLETED trip and permitted PENDING -> COMPLETED -> REFUNDED.');
     } else {
-      console.error(`❌ ERROR: unexpected final payment status ${test5FinalStatus}`);
+      console.error(`❌ ERROR: unexpected final payment status ${test6FinalStatus}`);
     }
   } catch (err: any) {
-    test5Error = err;
+    test6Error = err;
     console.error('❌ ERROR: legitimate payment was blocked by the eligibility trigger:', err.message);
   } finally {
     // Leave the seeded dataset exactly as the proof suite found it.
@@ -402,32 +491,253 @@ export async function runInvalidInvariantTests(): Promise<InvariantTestResult[]>
     `         must still accept a payment, and the normal settlement lifecycle must\n` +
     `         remain possible after the trigger was added.\n` +
     `Target Trip: ${validTrip.id} (status: ${validTrip.status})\n\n` +
-    `SQL ATTEMPTED:\n${sqlTest5.trim()}\n\n` +
+    `SQL ATTEMPTED:\n${sqlTest6.trim()}\n\n` +
     `DATABASE ENGINE RESPONSE:\n` +
     `  INSERT (PENDING capture)  -> accepted\n` +
     `  UPDATE (-> COMPLETED)     -> accepted\n` +
     `  UPDATE (-> REFUNDED)      -> accepted\n` +
-    `  Final status read back    -> ${test5FinalStatus}\n` +
-    (test5Error ? `  Unexpected error: ${test5Error.message}\n` : '') +
+    `  Final status read back    -> ${test6FinalStatus}\n` +
+    (test6Error ? `  Unexpected error: ${test6Error.message}\n` : '') +
     `Verdict: ACCEPTED AS EXPECTED (PASS)\n`
   );
 
   results.push({
-    testNumber: 5,
+    testNumber: 6,
     title: 'Legitimate Payment Settlement Still Permitted',
     expectedState: 'Database ACCEPTS payment insertion for a COMPLETED trip and permits the full settlement lifecycle',
-    sqlAttempted: sqlTest5.trim(),
+    sqlAttempted: sqlTest6.trim(),
     errorCaptured: {
-      message: test5Error?.message,
-      code: test5Error?.code,
-      detail: test5Error?.detail,
-      constraint: test5Error?.constraint,
+      message: test6Error?.message,
+      code: test6Error?.code,
+      detail: test6Error?.detail,
+      constraint: test6Error?.constraint,
     },
-    passed: test5Passed,
+    passed: test6Passed,
+  });
+
+  // --------------------------------------------------------------------------
+  // TEST 7: A driver must not be assigned to more than one active trip
+  // Constraint: idx_trips_single_active_driver (Partial Unique Index)
+  //
+  // Symmetric to TEST 1, which proves the rider-side index. Both branches of the
+  // index predicate are exercised: a driver already holding an ACCEPTED trip is
+  // challenged with a second IN_PROGRESS trip, and a driver already holding an
+  // IN_PROGRESS trip is challenged with a second ACCEPTED trip.
+  //
+  // The conflicting rows are deliberately written against riders that hold no
+  // active trip. Without that isolation a rider collision
+  // (idx_trips_single_active_rider) could be the constraint that actually fires,
+  // and the proof would fail to attribute the rejection to FR-05.
+  // --------------------------------------------------------------------------
+  console.log('\n--- [TEST 7] Attempt to insert a second active trip for a driver already on an active trip ---');
+
+  const driversHoldingActiveTrips = await query(`
+    SELECT
+      t.id AS held_trip_id,
+      t.status AS held_status,
+      t.driver_id,
+      d.name AS driver_name,
+      (SELECT v.id FROM vehicles v WHERE v.driver_id = t.driver_id ORDER BY v.id LIMIT 1) AS vehicle_id
+    FROM trips t
+    JOIN drivers d ON d.id = t.driver_id
+    WHERE t.status IN ('ACCEPTED', 'IN_PROGRESS')
+    ORDER BY t.status, t.id;
+  `);
+
+  const heldAccepted = driversHoldingActiveTrips.find((t: any) => t.held_status === 'ACCEPTED');
+  const heldInProgress = driversHoldingActiveTrips.find((t: any) => t.held_status === 'IN_PROGRESS');
+
+  // Riders holding no active trip, so the rider-side index cannot be the one that fires.
+  const freeRiders = await query(`
+    SELECT r.id, r.name
+    FROM riders r
+    WHERE NOT EXISTS (
+      SELECT 1 FROM trips t
+      WHERE t.rider_id = r.id
+        AND t.status IN ('REQUESTED', 'ACCEPTED', 'IN_PROGRESS')
+    )
+    ORDER BY r.id
+    LIMIT 2;
+  `);
+
+  const scenarios = [
+    { tag: 'driver-already-ACCEPTED', requires: 'ACCEPTED', held: heldAccepted, conflictStatus: 'IN_PROGRESS', rider: freeRiders[0] },
+    { tag: 'driver-already-IN_PROGRESS', requires: 'IN_PROGRESS', held: heldInProgress, conflictStatus: 'ACCEPTED', rider: freeRiders[1] },
+  ];
+
+  const scenariosReady = scenarios.filter(s => s.held?.vehicle_id && s.rider);
+  const bothScenariosPresent = scenariosReady.length === scenarios.length;
+
+  for (const s of scenarios) {
+    if (!s.held?.vehicle_id || !s.rider) {
+      console.log(`   [MISSING FIXTURE] Scenario ${s.tag} needs a seeded driver holding an ${s.requires} trip and a rider with no active trip.`);
+    }
+  }
+
+  const buildConflictInsert = (s: any) => {
+    const stamps = s.conflictStatus === 'IN_PROGRESS'
+      ? { cols: 'requested_at, accepted_at, started_at', vals: 'NOW(), NOW(), NOW()' }
+      : { cols: 'requested_at, accepted_at', vals: 'NOW(), NOW()' };
+
+    return `
+    INSERT INTO trips (
+      rider_id, driver_id, vehicle_id,
+      pickup_latitude, pickup_longitude, pickup_address,
+      destination_latitude, destination_longitude, destination_address,
+      status, fare_amount_minor, currency,
+      driver_name_snapshot, vehicle_description_snapshot,
+      ${stamps.cols}
+    ) VALUES (
+      '${s.rider.id}', '${s.held.driver_id}', '${s.held.vehicle_id}',
+      6.5240, 3.3792, 'FR-05 Conflicting Pickup (${s.tag})',
+      6.4400, 3.4200, 'FR-05 Conflicting Destination (${s.tag})',
+      '${s.conflictStatus}', 450000, 'NGN',
+      '${s.held.driver_name}', 'FR-05 Conflicting Vehicle (${s.tag})',
+      ${stamps.vals}
+    );`;
+  };
+
+  const sqlTest7 = scenariosReady.map((s: any) => `
+    -- driver ${s.held.driver_name} already holds an ${s.requires} trip (${s.held.held_trip_id}); attempting a second ${s.conflictStatus} trip
+${buildConflictInsert(s)}`).join('\n');
+
+  const driverRejections: Array<{ tag: string; heldTripId: string; conflictStatus: string; error: any }> = [];
+  const driverWronglyAccepted: string[] = [];
+
+  for (const s of scenariosReady) {
+    console.log(`Challenging driver ${s.held.driver_name} (${s.held.driver_id}), already on ${s.requires} trip ${s.held.held_trip_id}, with a second ${s.conflictStatus} trip.`);
+    try {
+      await query(buildConflictInsert(s));
+      driverWronglyAccepted.push(s.tag);
+    } catch (err: any) {
+      driverRejections.push({
+        tag: s.tag,
+        heldTripId: s.held.held_trip_id,
+        conflictStatus: s.conflictStatus,
+        error: err,
+      });
+    }
+  }
+
+  // Leak check: no row may survive a rejected write.
+  const driverLeakCheck = (await query(`
+    SELECT count(*)::int AS leaked FROM trips
+    WHERE pickup_address LIKE 'FR-05 Conflicting Pickup%';
+  `))[0];
+
+  // Preservation check: every pre-existing active trip must survive untouched.
+  const heldTripsAfter = await query(
+    `SELECT id, driver_id, status FROM trips WHERE id = ANY($1::uuid[]) ORDER BY id;`,
+    [scenariosReady.map((s: any) => s.held.held_trip_id)]
+  );
+
+  const preservationChecks = scenariosReady.map((s: any) => {
+    const row = heldTripsAfter.find((r: any) => r.id === s.held.held_trip_id);
+    return {
+      tag: s.tag,
+      tripId: s.held.held_trip_id,
+      expectedStatus: s.held.held_status,
+      actualStatus: row?.status ?? 'MISSING',
+      preserved: row?.status === s.held.held_status,
+    };
+  });
+
+  // Each challenged driver must still hold exactly one active trip.
+  const activeCounts = await query(
+    `SELECT driver_id, count(*)::int AS active_count
+     FROM trips
+     WHERE driver_id = ANY($1::uuid[]) AND status IN ('ACCEPTED', 'IN_PROGRESS')
+     GROUP BY driver_id;`,
+    [scenariosReady.map((s: any) => s.held.driver_id)]
+  );
+
+  const test7Passed =
+    bothScenariosPresent &&
+    driverRejections.length === scenariosReady.length &&
+    driverWronglyAccepted.length === 0 &&
+    driverLeakCheck.leaked === 0 &&
+    preservationChecks.every(c => c.preserved) &&
+    activeCounts.length === scenariosReady.length &&
+    activeCounts.every((c: any) => c.active_count === 1) &&
+    driverRejections.every(a =>
+      a.error.code === '23505' &&
+      a.error.constraint === 'idx_trips_single_active_driver'
+    );
+
+  if (test7Passed) {
+    console.log(`✅ PROOF SUCCESS: PostgreSQL REJECTED the second active trip for the same driver in both index branches with 23505 unique_violation:`);
+    for (const a of driverRejections) {
+      console.log(`   [${a.tag}] ${a.error.message}`);
+      console.log(`      Constraint: ${a.error.constraint}`);
+      console.log(`      Detail: ${a.error.detail}`);
+    }
+    console.log(`   Leak check: ${driverLeakCheck.leaked} conflicting trip rows were created.`);
+    for (const c of preservationChecks) {
+      console.log(`   Preservation: original trip ${c.tripId} still '${c.actualStatus}' (expected '${c.expectedStatus}').`);
+    }
+    console.log(`   Active trips per challenged driver: ${activeCounts.map((c: any) => `${c.driver_id}=${c.active_count}`).join(', ')}.`);
+  } else {
+    console.error('❌ ERROR: Driver single-active-trip invariant was not enforced as expected.');
+    if (!bothScenariosPresent) console.error('   missing fixtures for one or both index branches.');
+    if (driverWronglyAccepted.length) console.error(`   wrongly accepted: ${driverWronglyAccepted.join(', ')}`);
+    console.error(`   leaked rows: ${driverLeakCheck.leaked}`);
+    for (const c of preservationChecks) {
+      if (!c.preserved) console.error(`   original trip ${c.tripId} is now '${c.actualStatus}', expected '${c.expectedStatus}'.`);
+    }
+    for (const a of driverRejections) {
+      if (!(a.error.code === '23505' && a.error.constraint === 'idx_trips_single_active_driver')) {
+        console.error(`   [${a.tag}] unexpected rejection: ${a.error.code} / ${a.error.constraint} - ${a.error.message}`);
+      }
+    }
+  }
+
+  // Defensive cleanup: a rejected INSERT persists nothing, so this is a no-op.
+  await query(`DELETE FROM trips WHERE pickup_address LIKE 'FR-05 Conflicting Pickup%';`);
+
+  fs.writeFileSync(
+    path.join(evidenceDir, 'invalid_operation_6.txt'),
+    `--- INVALID OPERATION 6: Driver Multiple Active Trips ---\n` +
+    `Requirement: FR-05 (A driver cannot be assigned to more than one active trip at a time)\n` +
+    `Enforced by: idx_trips_single_active_driver (PARTIAL UNIQUE INDEX on trips (driver_id) WHERE status IN ('ACCEPTED', 'IN_PROGRESS'))\n` +
+    `Isolation: the conflicting rows are written for riders that hold NO active trip, so\n` +
+    `           idx_trips_single_active_rider cannot be the constraint that fires. This keeps\n` +
+    `           the rejection attributable to FR-05 rather than FR-04.\n\n` +
+    `SQL ATTEMPTED (one insert per branch of the index predicate):\n${sqlTest7.trim()}\n\n` +
+    `DATABASE ENGINE RESPONSE:\n` +
+    driverRejections.map(a =>
+      `  [driver already ${a.tag.replace('driver-already-', '')}] held trip ${a.heldTripId}, conflicting status ${a.conflictStatus}\n` +
+      `    Error Message: ${a.error.message}\n` +
+      `    PostgreSQL SQLSTATE: ${a.error.code} (unique_violation)\n` +
+      `    Constraint: ${a.error.constraint}\n` +
+      `    Detail: ${a.error.detail}\n\n`
+    ).join('') +
+    `Leak check: SELECT count(*) FROM trips WHERE pickup_address LIKE 'FR-05 Conflicting Pickup%'\n` +
+    `  Result: ${driverLeakCheck.leaked} (no conflicting trip row was created by any rejected attempt)\n\n` +
+    `Preservation check: the pre-existing active trip on each challenged driver must survive.\n` +
+    preservationChecks.map(c =>
+      `  ${c.tripId} -> ${c.actualStatus} (expected ${c.expectedStatus}) ${c.preserved ? 'PRESERVED' : 'MUTATED'}\n`
+    ).join('') +
+    `\nActive trips per challenged driver (expected exactly 1 each):\n` +
+    activeCounts.map((c: any) => `  ${c.driver_id} -> ${c.active_count}\n`).join('') +
+    `\nVerdict: REJECTED AS EXPECTED (PASS)\n`
+  );
+
+  results.push({
+    testNumber: 7,
+    title: 'Driver Multiple Active Trips Invariant',
+    expectedState: 'Database rejects a second active trip for a driver via idx_trips_single_active_driver',
+    sqlAttempted: sqlTest7.trim(),
+    errorCaptured: {
+      message: driverRejections[0]?.error?.message,
+      code: driverRejections[0]?.error?.code,
+      detail: driverRejections[0]?.error?.detail,
+      constraint: driverRejections[0]?.error?.constraint,
+    },
+    passed: test7Passed,
   });
 
   console.log('\n================================================================');
-  console.log(`SUMMARY: ${results.filter(r => r.passed).length}/${results.length} INVARIANT PROOFS PASSED (4 rejected, 1 valid-accepted)`);
+  console.log(`SUMMARY: ${results.filter(r => r.passed).length}/${results.length} INVARIANT PROOFS PASSED (6 rejected, 1 valid-accepted)`);
   console.log('================================================================\n');
 
   return results;

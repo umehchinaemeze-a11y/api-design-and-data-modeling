@@ -331,14 +331,14 @@ EXECUTE FUNCTION enforce_review_completion();
 -- ============================================================================
 -- TRIGGER: payment completion gate
 -- ============================================================================
--- Guarantees that a payment can only ever be created for a COMPLETED trip.
+-- Guarantees that a payment can only ever reference a COMPLETED trip, on both
+-- INSERT and UPDATE of trip_id.
 --
--- INSERT-only is sufficient here, and is deliberately the smallest mechanism
--- that is also provably complete: trg_enforce_trip_status_transition already
--- freezes a trip once it reaches COMPLETED, so a trip that was COMPLETED at
--- insert time can never become ineligible afterwards. Re-pointing an existing
--- payment at a different trip is independently blocked by
--- payments_trip_id_key (UNIQUE) and by trips(id) ON DELETE RESTRICT.
+-- INSERT alone is insufficient: payments.trip_id is mutable, and neither
+-- payments_trip_id_key (UNIQUE, which only forbids two payments sharing a
+-- trip) nor the foreign key (which only requires the trip to exist) prevents
+-- an existing payment from being re-pointed to a still-open IN_PROGRESS trip.
+-- Covering UPDATE OF trip_id closes that hole with the same COMPLETED check.
 --
 -- DEFENCE IN DEPTH. The API (POST /api/v1/trips/:id/payment) also pre-checks
 -- eligibility, but only so it can return a precise client-facing 409 naming
@@ -370,6 +370,6 @@ END;
 $$ LANGUAGE plpgsql;
 
 CREATE TRIGGER trg_enforce_payment_completion
-BEFORE INSERT ON payments
+BEFORE INSERT OR UPDATE OF trip_id ON payments
 FOR EACH ROW
 EXECUTE FUNCTION enforce_payment_completion();

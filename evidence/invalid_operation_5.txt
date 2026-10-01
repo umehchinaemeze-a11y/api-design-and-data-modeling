@@ -1,0 +1,19 @@
+--- INVALID OPERATION 5: Payment Re-Pointed to a Non-Completed Trip ---
+Requirement: FR-11 (A payment can only be captured for a completed trip)
+Enforced by: trg_enforce_payment_completion (BEFORE INSERT OR UPDATE OF trip_id ON payments)
+
+Source payment: 55555555-5555-4555-a555-000000000001 (trip 44444444-4444-4444-a444-000000000001, COMPLETED)
+Target trip:    44444444-4444-4444-a444-000000000222 (IN_PROGRESS)
+
+SQL ATTEMPTED:
+UPDATE payments
+    SET trip_id = '44444444-4444-4444-a444-000000000222'
+    WHERE id = '55555555-5555-4555-a555-000000000001';
+
+DATABASE ENGINE RESPONSE:
+Error Message: Payments are only permitted for COMPLETED trips. Current status of trip 44444444-4444-4444-a444-000000000222 is IN_PROGRESS
+PostgreSQL SQLSTATE: 23514 (check_violation raised by enforce_payment_completion trigger)
+
+Leak check: SELECT trip_id FROM payments WHERE id = '55555555-5555-4555-a555-000000000001'
+  Result: 44444444-4444-4444-a444-000000000001 (payment still bound to its original COMPLETED trip)
+Verdict: REJECTED AS EXPECTED (PASS)

@@ -1,5 +1,5 @@
 --- MIGRATION RUN LOG ---
-Timestamp: 2026-09-29T18:01:50.531Z
+Timestamp: 2026-10-01T12:21:42.314Z
 Migration: migrations/001_initial_schema.sql
 Target: PostgreSQL 16 on port 15436
 Database: urbanglide_db

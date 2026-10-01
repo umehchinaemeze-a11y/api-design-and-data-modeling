@@ -1,6 +1,6 @@
 --- INVALID OPERATION 4: Payment for Non-Completed Trip ---
 Requirement: FR-11 (A payment can only be captured for a completed trip)
-Enforced by: trg_enforce_payment_completion (BEFORE INSERT ON payments)
+Enforced by: trg_enforce_payment_completion (BEFORE INSERT OR UPDATE OF trip_id ON payments)
 Status coverage: ACCEPTED, CANCELLED, IN_PROGRESS, REQUESTED
 
 SQL ATTEMPTED (one insert per non-terminal status):
