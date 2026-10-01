@@ -426,8 +426,229 @@ export async function runInvalidInvariantTests(): Promise<InvariantTestResult[]>
     passed: test5Passed,
   });
 
+  // --------------------------------------------------------------------------
+  // TEST 6: A driver must not be assigned to more than one active trip
+  // Constraint: idx_trips_single_active_driver (Partial Unique Index)
+  //
+  // Symmetric to TEST 1, which proves the rider-side index. Both branches of the
+  // index predicate are exercised: a driver already holding an ACCEPTED trip is
+  // challenged with a second IN_PROGRESS trip, and a driver already holding an
+  // IN_PROGRESS trip is challenged with a second ACCEPTED trip.
+  //
+  // The conflicting rows are deliberately written against riders that hold no
+  // active trip. Without that isolation a rider collision
+  // (idx_trips_single_active_rider) could be the constraint that actually fires,
+  // and the proof would fail to attribute the rejection to FR-05.
+  // --------------------------------------------------------------------------
+  console.log('\n--- [TEST 6] Attempt to insert a second active trip for a driver already on an active trip ---');
+
+  const driversHoldingActiveTrips = await query(`
+    SELECT
+      t.id AS held_trip_id,
+      t.status AS held_status,
+      t.driver_id,
+      d.name AS driver_name,
+      (SELECT v.id FROM vehicles v WHERE v.driver_id = t.driver_id ORDER BY v.id LIMIT 1) AS vehicle_id
+    FROM trips t
+    JOIN drivers d ON d.id = t.driver_id
+    WHERE t.status IN ('ACCEPTED', 'IN_PROGRESS')
+    ORDER BY t.status, t.id;
+  `);
+
+  const heldAccepted = driversHoldingActiveTrips.find((t: any) => t.held_status === 'ACCEPTED');
+  const heldInProgress = driversHoldingActiveTrips.find((t: any) => t.held_status === 'IN_PROGRESS');
+
+  // Riders holding no active trip, so the rider-side index cannot be the one that fires.
+  const freeRiders = await query(`
+    SELECT r.id, r.name
+    FROM riders r
+    WHERE NOT EXISTS (
+      SELECT 1 FROM trips t
+      WHERE t.rider_id = r.id
+        AND t.status IN ('REQUESTED', 'ACCEPTED', 'IN_PROGRESS')
+    )
+    ORDER BY r.id
+    LIMIT 2;
+  `);
+
+  const scenarios = [
+    { tag: 'driver-already-ACCEPTED', requires: 'ACCEPTED', held: heldAccepted, conflictStatus: 'IN_PROGRESS', rider: freeRiders[0] },
+    { tag: 'driver-already-IN_PROGRESS', requires: 'IN_PROGRESS', held: heldInProgress, conflictStatus: 'ACCEPTED', rider: freeRiders[1] },
+  ];
+
+  const scenariosReady = scenarios.filter(s => s.held?.vehicle_id && s.rider);
+  const bothScenariosPresent = scenariosReady.length === scenarios.length;
+
+  for (const s of scenarios) {
+    if (!s.held?.vehicle_id || !s.rider) {
+      console.log(`   [MISSING FIXTURE] Scenario ${s.tag} needs a seeded driver holding an ${s.requires} trip and a rider with no active trip.`);
+    }
+  }
+
+  const buildConflictInsert = (s: any) => {
+    const stamps = s.conflictStatus === 'IN_PROGRESS'
+      ? { cols: 'requested_at, accepted_at, started_at', vals: 'NOW(), NOW(), NOW()' }
+      : { cols: 'requested_at, accepted_at', vals: 'NOW(), NOW()' };
+
+    return `
+    INSERT INTO trips (
+      rider_id, driver_id, vehicle_id,
+      pickup_latitude, pickup_longitude, pickup_address,
+      destination_latitude, destination_longitude, destination_address,
+      status, fare_amount_minor, currency,
+      driver_name_snapshot, vehicle_description_snapshot,
+      ${stamps.cols}
+    ) VALUES (
+      '${s.rider.id}', '${s.held.driver_id}', '${s.held.vehicle_id}',
+      6.5240, 3.3792, 'FR-05 Conflicting Pickup (${s.tag})',
+      6.4400, 3.4200, 'FR-05 Conflicting Destination (${s.tag})',
+      '${s.conflictStatus}', 450000, 'NGN',
+      '${s.held.driver_name}', 'FR-05 Conflicting Vehicle (${s.tag})',
+      ${stamps.vals}
+    );`;
+  };
+
+  const sqlTest7 = scenariosReady.map((s: any) => `
+    -- driver ${s.held.driver_name} already holds an ${s.requires} trip (${s.held.held_trip_id}); attempting a second ${s.conflictStatus} trip
+${buildConflictInsert(s)}`).join('\n');
+
+  const driverRejections: Array<{ tag: string; heldTripId: string; conflictStatus: string; error: any }> = [];
+  const driverWronglyAccepted: string[] = [];
+
+  for (const s of scenariosReady) {
+    console.log(`Challenging driver ${s.held.driver_name} (${s.held.driver_id}), already on ${s.requires} trip ${s.held.held_trip_id}, with a second ${s.conflictStatus} trip.`);
+    try {
+      await query(buildConflictInsert(s));
+      driverWronglyAccepted.push(s.tag);
+    } catch (err: any) {
+      driverRejections.push({
+        tag: s.tag,
+        heldTripId: s.held.held_trip_id,
+        conflictStatus: s.conflictStatus,
+        error: err,
+      });
+    }
+  }
+
+  // Leak check: no row may survive a rejected write.
+  const driverLeakCheck = (await query(`
+    SELECT count(*)::int AS leaked FROM trips
+    WHERE pickup_address LIKE 'FR-05 Conflicting Pickup%';
+  `))[0];
+
+  // Preservation check: every pre-existing active trip must survive untouched.
+  const heldTripsAfter = await query(
+    `SELECT id, driver_id, status FROM trips WHERE id = ANY($1::uuid[]) ORDER BY id;`,
+    [scenariosReady.map((s: any) => s.held.held_trip_id)]
+  );
+
+  const preservationChecks = scenariosReady.map((s: any) => {
+    const row = heldTripsAfter.find((r: any) => r.id === s.held.held_trip_id);
+    return {
+      tag: s.tag,
+      tripId: s.held.held_trip_id,
+      expectedStatus: s.held.held_status,
+      actualStatus: row?.status ?? 'MISSING',
+      preserved: row?.status === s.held.held_status,
+    };
+  });
+
+  // Each challenged driver must still hold exactly one active trip.
+  const activeCounts = await query(
+    `SELECT driver_id, count(*)::int AS active_count
+     FROM trips
+     WHERE driver_id = ANY($1::uuid[]) AND status IN ('ACCEPTED', 'IN_PROGRESS')
+     GROUP BY driver_id;`,
+    [scenariosReady.map((s: any) => s.held.driver_id)]
+  );
+
+  const test7Passed =
+    bothScenariosPresent &&
+    driverRejections.length === scenariosReady.length &&
+    driverWronglyAccepted.length === 0 &&
+    driverLeakCheck.leaked === 0 &&
+    preservationChecks.every(c => c.preserved) &&
+    activeCounts.length === scenariosReady.length &&
+    activeCounts.every((c: any) => c.active_count === 1) &&
+    driverRejections.every(a =>
+      a.error.code === '23505' &&
+      a.error.constraint === 'idx_trips_single_active_driver'
+    );
+
+  if (test7Passed) {
+    console.log(`✅ PROOF SUCCESS: PostgreSQL REJECTED the second active trip for the same driver in both index branches with 23505 unique_violation:`);
+    for (const a of driverRejections) {
+      console.log(`   [${a.tag}] ${a.error.message}`);
+      console.log(`      Constraint: ${a.error.constraint}`);
+      console.log(`      Detail: ${a.error.detail}`);
+    }
+    console.log(`   Leak check: ${driverLeakCheck.leaked} conflicting trip rows were created.`);
+    for (const c of preservationChecks) {
+      console.log(`   Preservation: original trip ${c.tripId} still '${c.actualStatus}' (expected '${c.expectedStatus}').`);
+    }
+    console.log(`   Active trips per challenged driver: ${activeCounts.map((c: any) => `${c.driver_id}=${c.active_count}`).join(', ')}.`);
+  } else {
+    console.error('❌ ERROR: Driver single-active-trip invariant was not enforced as expected.');
+    if (!bothScenariosPresent) console.error('   missing fixtures for one or both index branches.');
+    if (driverWronglyAccepted.length) console.error(`   wrongly accepted: ${driverWronglyAccepted.join(', ')}`);
+    console.error(`   leaked rows: ${driverLeakCheck.leaked}`);
+    for (const c of preservationChecks) {
+      if (!c.preserved) console.error(`   original trip ${c.tripId} is now '${c.actualStatus}', expected '${c.expectedStatus}'.`);
+    }
+    for (const a of driverRejections) {
+      if (!(a.error.code === '23505' && a.error.constraint === 'idx_trips_single_active_driver')) {
+        console.error(`   [${a.tag}] unexpected rejection: ${a.error.code} / ${a.error.constraint} - ${a.error.message}`);
+      }
+    }
+  }
+
+  // Defensive cleanup: a rejected INSERT persists nothing, so this is a no-op.
+  await query(`DELETE FROM trips WHERE pickup_address LIKE 'FR-05 Conflicting Pickup%';`);
+
+  fs.writeFileSync(
+    path.join(evidenceDir, 'invalid_operation_6.txt'),
+    `--- INVALID OPERATION 6: Driver Multiple Active Trips ---\n` +
+    `Requirement: FR-05 (A driver cannot be assigned to more than one active trip at a time)\n` +
+    `Enforced by: idx_trips_single_active_driver (PARTIAL UNIQUE INDEX on trips (driver_id) WHERE status IN ('ACCEPTED', 'IN_PROGRESS'))\n` +
+    `Isolation: the conflicting rows are written for riders that hold NO active trip, so\n` +
+    `           idx_trips_single_active_rider cannot be the constraint that fires. This keeps\n` +
+    `           the rejection attributable to FR-05 rather than FR-04.\n\n` +
+    `SQL ATTEMPTED (one insert per branch of the index predicate):\n${sqlTest7.trim()}\n\n` +
+    `DATABASE ENGINE RESPONSE:\n` +
+    driverRejections.map(a =>
+      `  [driver already ${a.tag.replace('driver-already-', '')}] held trip ${a.heldTripId}, conflicting status ${a.conflictStatus}\n` +
+      `    Error Message: ${a.error.message}\n` +
+      `    PostgreSQL SQLSTATE: ${a.error.code} (unique_violation)\n` +
+      `    Constraint: ${a.error.constraint}\n` +
+      `    Detail: ${a.error.detail}\n\n`
+    ).join('') +
+    `Leak check: SELECT count(*) FROM trips WHERE pickup_address LIKE 'FR-05 Conflicting Pickup%'\n` +
+    `  Result: ${driverLeakCheck.leaked} (no conflicting trip row was created by any rejected attempt)\n\n` +
+    `Preservation check: the pre-existing active trip on each challenged driver must survive.\n` +
+    preservationChecks.map(c =>
+      `  ${c.tripId} -> ${c.actualStatus} (expected ${c.expectedStatus}) ${c.preserved ? 'PRESERVED' : 'MUTATED'}\n`
+    ).join('') +
+    `\nActive trips per challenged driver (expected exactly 1 each):\n` +
+    activeCounts.map((c: any) => `  ${c.driver_id} -> ${c.active_count}\n`).join('') +
+    `\nVerdict: REJECTED AS EXPECTED (PASS)\n`
+  );
+
+  results.push({
+    testNumber: 6,
+    title: 'Driver Multiple Active Trips Invariant',
+    expectedState: 'Database rejects a second active trip for a driver via idx_trips_single_active_driver',
+    sqlAttempted: sqlTest7.trim(),
+    errorCaptured: {
+      message: driverRejections[0]?.error?.message,
+      code: driverRejections[0]?.error?.code,
+      detail: driverRejections[0]?.error?.detail,
+      constraint: driverRejections[0]?.error?.constraint,
+    },
+    passed: test7Passed,
+  });
+
   console.log('\n================================================================');
-  console.log(`SUMMARY: ${results.filter(r => r.passed).length}/${results.length} INVARIANT PROOFS PASSED (4 rejected, 1 valid-accepted)`);
+  console.log(`SUMMARY: ${results.filter(r => r.passed).length}/${results.length} INVARIANT PROOFS PASSED (5 rejected, 1 valid-accepted)`);
   console.log('================================================================\n');
 
   return results;

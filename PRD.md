@@ -95,7 +95,7 @@ To preserve architectural focus and adhere to the proof-layer scope, the followi
 | Requirement ID | Domain Rule / Requirement | Design Decision | Entity / Schema Enforcement | Proof / Evidence |
 | :--- | :--- | :--- | :--- | :--- |
 | **FR-04** | One rider cannot have multiple active trips simultaneously | Partial Unique Index on `(rider_id)` where status is active | `trips (rider_id)` WHERE `status IN ('REQUESTED', 'ACCEPTED', 'IN_PROGRESS')` | Invalid Test #1 (Attempt duplicate active trip) |
-| **FR-05** | One driver cannot handle conflicting active trips | Partial Unique Index on `(driver_id)` where status is active | `trips (driver_id)` WHERE `status IN ('ACCEPTED', 'IN_PROGRESS')` | Database constraint schema test |
+| **FR-05** | One driver cannot handle conflicting active trips | Partial Unique Index on `(driver_id)` where status is active | `trips (driver_id)` WHERE `status IN ('ACCEPTED', 'IN_PROGRESS')` | Invalid Test #6 (`23505` on `idx_trips_single_active_driver`, both index branches) & database constraint schema test |
 | **FR-03** | Completed trip cannot return to in-progress or cancelled | PostgreSQL Transition Trigger raising SQLSTATE exception | `trg_enforce_trip_status_transition` on `BEFORE UPDATE OF status` | Invalid Test #2 (Transition `COMPLETED` $\rightarrow$ `IN_PROGRESS`) |
 | **FR-06** | Historical trip fare remains immutable | Fare snapshot columns on Trip record | `trips.fare_amount_minor`, `trips.currency` | Seed verification & Query #3 inspection |
 | **FR-07** | Historical driver/vehicle identity remains stable | Denormalized snapshot strings on Trip | `trips.driver_name_snapshot`, `trips.vehicle_description_snapshot` | Query #3 inspection |

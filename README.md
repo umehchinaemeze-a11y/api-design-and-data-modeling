@@ -87,7 +87,7 @@ This repository is an architectural proof and design deliverable. The implementa
 | Requirement | Domain Rule | Architectural Decision | Schema / DB Mechanism | Proof Evidence |
 | :--- | :--- | :--- | :--- | :--- |
 | **FR-04** | One rider cannot have multiple active trips | Partial Unique Index on `trips(rider_id)` | `WHERE status IN ('REQUESTED', 'ACCEPTED', 'IN_PROGRESS')` | Invalid Test #1 (`23505`) |
-| **FR-05** | One driver cannot handle conflicting active trips | Partial Unique Index on `trips(driver_id)` | `WHERE status IN ('ACCEPTED', 'IN_PROGRESS')` | Live schema index `idx_trips_single_active_driver` |
+| **FR-05** | One driver cannot handle conflicting active trips | Partial Unique Index on `trips(driver_id)` | `WHERE status IN ('ACCEPTED', 'IN_PROGRESS')` | Invalid Test #6 (`23505`, both index branches) |
 | **FR-03** | Completed trip cannot return to in-progress | PostgreSQL PL/pgSQL trigger on `BEFORE UPDATE` | `trg_enforce_trip_status_transition` | Invalid Test #2 (`23514`) |
 | **FR-06** | Historical trip fare remains immutable | Fare snapshot columns on Trip record | `trips.fare_amount_minor`, `trips.currency` | Seed verification & Query #3 |
 | **FR-07** | Historical driver/vehicle identity remains stable | Denormalized snapshot strings on Trip | `trips.driver_name_snapshot`, `trips.vehicle_description_snapshot` | Query #3 inspection |
@@ -1219,8 +1219,8 @@ If the platform added a bidirectional peer-to-peer VoIP audio calling feature or
 
 ## 26. Invalid-State Database Proofs
 
-Four invalid operations are executed against live PostgreSQL 16 and rejected by
-the engine. A fifth, **valid** operation is run as a control to prove the new
+Five invalid operations are executed against live PostgreSQL 16 and rejected by
+the engine. A sixth, **valid** operation is run as a control to prove the new
 payment gate is not over-broad. The text below mirrors the committed captures in
 `evidence/invalid_operation_*.txt` and `evidence/valid_operation_1.txt`; those
 files are the authoritative copy.
@@ -1271,7 +1271,24 @@ files are the authoritative copy.
   `BEFORE INSERT` gate, so no orphaned payment row survives a rejected attempt.
 - **Capture:** `evidence/invalid_operation_4.txt`
 
-### Valid State 5: Payment for a Completed Trip (control)
+### Invalid State 5: Multiple Active Trips for One Driver
+- **Attempted Action:** Assigning a driver a second active trip. Both branches of the index predicate are exercised — a driver already on an `ACCEPTED` trip is given a second `IN_PROGRESS` trip, and a driver already on an `IN_PROGRESS` trip is given a second `ACCEPTED` trip.
+- **Isolation:** The conflicting rows are written for riders that hold **no** active trip, so `idx_trips_single_active_rider` cannot be the constraint that fires. Without that isolation the rejection would not be attributable to FR-05 rather than FR-04.
+- **Database Engine Response (one rejection per index branch):**
+  ```
+  PostgreSQL SQLSTATE: 23505 (unique_violation)
+  Constraint: idx_trips_single_active_driver
+  Detail: Key (driver_id)=(...) already exists.
+  Leak check: SELECT count(*) FROM trips WHERE pickup_address LIKE 'FR-05 Conflicting Pickup%'  --  0
+  Preservation check: each pre-existing active trip unchanged, and still exactly 1 active trip per challenged driver
+  Verdict: REJECTED BY DATABASE ENGINE (PASS)
+  ```
+  This is the driver-side counterpart to Invalid State 1. The `UNIQUE` index, not
+  the API, is what refuses the second booking; the API only translates `23505`
+  into `409 DRIVER_ALREADY_ON_TRIP` after the engine has already refused the write.
+- **Capture:** `evidence/invalid_operation_6.txt`
+
+### Valid State 6: Payment for a Completed Trip (control)
 
 The complementary control proving the new gate did not break legitimate
 settlement. A `COMPLETED` trip accepts a payment, and the normal

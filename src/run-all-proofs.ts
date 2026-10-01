@@ -128,7 +128,7 @@ async function runAllProofs() {
     // 5. Run Query Plans
     await runExplainPlans();
 
-    // 6. Run Invariant Proofs (4 rejections + 1 acceptance control)
+    // 6. Run Invariant Proofs (5 rejections + 1 acceptance control)
     const invariantResults = await runInvalidInvariantTests();
     const allInvariantsPassed = invariantResults.every(r => r.passed);
     if (!allInvariantsPassed) {
