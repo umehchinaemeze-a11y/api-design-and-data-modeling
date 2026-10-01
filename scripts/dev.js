@@ -242,6 +242,14 @@ const server = http.createServer(async (req, res) => {
             try {
                 // driver_name_snapshot / vehicle_description_snapshot are deliberate
                 // historical copies: the live driver record may be edited or soft deleted later.
+                //
+                // The status = 'REQUESTED' predicate is required here and cannot be left to
+                // trg_enforce_trip_status_transition. That trigger short-circuits whenever
+                // OLD.status = NEW.status, so a repeated accept on an already-ACCEPTED trip
+                // passed straight through and silently rewrote the FR-07 snapshots (and could
+                // reassign the trip to a different driver). Only a REQUESTED trip is
+                // acceptable, so the guard belongs in the same statement as the write: that
+                // keeps it atomic rather than racing a separate status SELECT.
                 const updateRes = await client.query(`
                     UPDATE trips
                     SET status = 'ACCEPTED',
@@ -252,12 +260,20 @@ const server = http.createServer(async (req, res) => {
                         vehicle_description_snapshot = (
                             SELECT make || ' ' || model FROM vehicles WHERE id = $2
                         )
-                    WHERE id = $3
+                    WHERE id = $3 AND status = 'REQUESTED'
                     RETURNING *;
                 `, [driverId, vehicleId, tripId]);
 
                 if (updateRes.rows.length === 0) {
-                    return sendError(res, 404, 'TRIP_NOT_FOUND', `Trip with id ${tripId} not found.`);
+                    // Either the trip does not exist, or it has already left REQUESTED.
+                    // Distinguish them so a wrong-state trip is a 409, not a 404.
+                    const existing = await client.query(
+                        `SELECT status FROM trips WHERE id = $1;`, [tripId]);
+                    if (existing.rows.length === 0) {
+                        return sendError(res, 404, 'TRIP_NOT_FOUND', `Trip with id ${tripId} not found.`);
+                    }
+                    return sendError(res, 409, 'INVALID_STATE_TRANSITION',
+                        `Trip with id ${tripId} is in status ${existing.rows[0].status} and can no longer be accepted. Only a REQUESTED trip can be accepted.`);
                 }
                 return sendJson(res, 200, { trip: updateRes.rows[0] });
             } catch (dbErr) {

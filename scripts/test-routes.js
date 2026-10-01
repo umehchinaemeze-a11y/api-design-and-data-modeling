@@ -52,6 +52,17 @@ const VEHICLE_FREE = ID.vehicle(5);   // registered to DRIVER_FREE
 const RIDER_NO_ACTIVE = ID.rider(4);  // only holds terminal trips
 const RIDER_ACTIVE = ID.rider(1);     // holds trip 221
 
+/* GROUP E builds three accepted fixtures, so it needs three riders that each hold
+ * no active trip (FR-04 caps a rider at one) and three drivers that each hold no
+ * active trip (FR-05 caps a driver at one). Rider 2 is free because GROUP B cancels
+ * its trip 222; rider 10 only ever holds COMPLETED trips. Drivers 1 and 2 are both
+ * AVAILABLE and unassigned in the seed, and vehicle N belongs to driver N. */
+const RIDER_FIXTURE_1 = ID.rider(4);
+const RIDER_FIXTURE_2 = ID.rider(2);
+const RIDER_FIXTURE_3 = ID.rider(10);
+const DRIVER_ALT = ID.driver(2);
+const VEHICLE_ALT = ID.vehicle(2);
+
 let pass = 0, fail = 0;
 let cleanupFailed = false;
 const rows = [];
@@ -114,6 +125,21 @@ async function call(method, path, body) {
     try { json = await res.json(); } catch (e) { json = null; }
     return { status: res.status, body: json };
 }
+
+/* Direct database read-back, so snapshot assertions are made against stored rows
+ * rather than against whatever the API chose to echo back. */
+async function dbRow(sql, params) {
+    const client = new Client({ connectionString: TARGET.connectionString });
+    await client.connect();
+    try {
+        const res = await client.query(sql, params);
+        return res.rows[0] || null;
+    } finally {
+        await client.end();
+    }
+}
+
+const FR07_COLUMNS = `status::text, driver_id, vehicle_id, driver_name_snapshot, vehicle_description_snapshot`;
 
 /* The assertions themselves, run against a booted server. Separated from main()
  * so the try/finally that guarantees cleanup can wrap the whole body without
@@ -348,6 +374,112 @@ async function runGroups() {
         const r = await call('GET', '/trips/00000000-0000-0000-0000-000000000000/start');
         check('GET on action sub-resource -> 404 (method mismatch, not 200)',
             r.status === 404, `status=${r.status}`);
+    }
+
+    console.log('GROUP E: POST /api/v1/trips/:id/accept (FR-07 snapshot rewrite regression)');
+    {
+        // The lifecycle trigger short-circuits when OLD.status = NEW.status, so a repeated
+        // accept used to succeed and overwrite driver_name_snapshot /
+        // vehicle_description_snapshot, and could reassign the trip to another driver.
+        const mk = await call('POST', '/trips', {
+            riderId: RIDER_FIXTURE_1, pickupAddress: '10 Accept Way', destinationAddress: '11 Accept Lane',
+            fareAmountMinor: 2750, currency: 'USD'
+        });
+        const trip = mk.body?.trip?.id;
+        if (trip) created.trips.add(trip);
+        check('setup: create trip for accept regression -> 201 requested',
+            mk.status === 201 && mk.body?.trip?.status === 'REQUESTED', `status=${mk.status} body=${JSON.stringify(mk.body)}`);
+
+        const first = await call('POST', `/trips/${trip}/accept`, { driverId: DRIVER_FREE, vehicleId: VEHICLE_FREE });
+        check('accept on REQUESTED trip with a valid driver -> 200 accepted',
+            first.status === 200 && first.body?.trip?.status === 'ACCEPTED', `status=${first.status} body=${JSON.stringify(first.body)}`);
+        check('first accept persists driver_id and vehicle_id',
+            first.body?.trip?.driver_id === DRIVER_FREE && first.body?.trip?.vehicle_id === VEHICLE_FREE,
+            `driver_id=${first.body?.trip?.driver_id} vehicle_id=${first.body?.trip?.vehicle_id}`);
+
+        const accepted = await dbRow(`SELECT ${FR07_COLUMNS} FROM trips WHERE id = $1;`, [trip]);
+        check('first accept populates driver_name_snapshot from drivers.name',
+            accepted?.driver_name_snapshot === 'Olumide Bakare', `driver_name_snapshot=${accepted?.driver_name_snapshot}`);
+        check('first accept populates vehicle_description_snapshot from the assigned vehicle',
+            typeof accepted?.vehicle_description_snapshot === 'string'
+                && accepted.vehicle_description_snapshot.includes('Toyota')
+                && accepted.vehicle_description_snapshot.includes('Sienna'),
+            `vehicle_description_snapshot=${accepted?.vehicle_description_snapshot}`);
+
+        // Re-accept with the SAME driver: must be refused.
+        const repeat = await call('POST', `/trips/${trip}/accept`, { driverId: DRIVER_FREE, vehicleId: VEHICLE_FREE });
+        check('re-POST /accept on an already-ACCEPTED trip (same driver) -> 409 INVALID_STATE_TRANSITION',
+            repeat.status === 409 && repeat.body?.error?.code === 'INVALID_STATE_TRANSITION',
+            `status=${repeat.status} body=${JSON.stringify(repeat.body)}`);
+
+        // Re-accept with a DIFFERENT free driver: must be refused and must not reassign.
+        const hijack = await call('POST', `/trips/${trip}/accept`, { driverId: DRIVER, vehicleId: VEHICLE });
+        check('re-POST /accept on an already-ACCEPTED trip (different driver) -> 409 INVALID_STATE_TRANSITION',
+            hijack.status === 409 && hijack.body?.error?.code === 'INVALID_STATE_TRANSITION',
+            `status=${hijack.status} body=${JSON.stringify(hijack.body)}`);
+
+        const after = await dbRow(`SELECT ${FR07_COLUMNS} FROM trips WHERE id = $1;`, [trip]);
+        check('rejected repeat accept leaves status unchanged (ACCEPTED)',
+            after?.status === accepted?.status, `before=${accepted?.status} after=${after?.status}`);
+        check('rejected repeat accept does not reassign the driver',
+            after?.driver_id === accepted?.driver_id, `before=${accepted?.driver_id} after=${after?.driver_id}`);
+        check('rejected repeat accept does not change vehicle_id',
+            after?.vehicle_id === accepted?.vehicle_id, `before=${accepted?.vehicle_id} after=${after?.vehicle_id}`);
+        check('rejected repeat accept does not rewrite driver_name_snapshot',
+            after?.driver_name_snapshot === accepted?.driver_name_snapshot,
+            `before=${accepted?.driver_name_snapshot} after=${after?.driver_name_snapshot}`);
+        check('rejected repeat accept does not rewrite vehicle_description_snapshot',
+            after?.vehicle_description_snapshot === accepted?.vehicle_description_snapshot,
+            `before=${accepted?.vehicle_description_snapshot} after=${after?.vehicle_description_snapshot}`);
+    }
+    {
+        // The guard must not over-block: a REQUESTED trip is still acceptable.
+        const mk = await call('POST', '/trips', {
+            riderId: RIDER_FIXTURE_2, pickupAddress: '12 Accept Way', destinationAddress: '13 Accept Lane',
+            fareAmountMinor: 1800, currency: 'USD'
+        });
+        const trip = mk.body?.trip?.id;
+        if (trip) created.trips.add(trip);
+        const r = await call('POST', `/trips/${trip}/accept`, { driverId: DRIVER_ALT, vehicleId: VEHICLE_ALT });
+        check('valid accept flow still passes on a fresh REQUESTED trip -> 200 accepted',
+            r.status === 200 && r.body?.trip?.status === 'ACCEPTED', `status=${r.status} body=${JSON.stringify(r.body)}`);
+    }
+    {
+        // Drive a fixture to IN_PROGRESS, then attempt accept.
+        const mk = await call('POST', '/trips', {
+            riderId: RIDER_FIXTURE_3, pickupAddress: '14 Accept Way', destinationAddress: '15 Accept Lane',
+            fareAmountMinor: 3600, currency: 'USD'
+        });
+        const trip = mk.body?.trip?.id;
+        if (trip) created.trips.add(trip);
+        await call('POST', `/trips/${trip}/accept`, { driverId: DRIVER, vehicleId: VEHICLE });
+        const started = await call('POST', `/trips/${trip}/start`, {});
+        check('setup: accepted trip started -> 200 in_progress',
+            started.status === 200 && started.body?.trip?.status === 'IN_PROGRESS', `status=${started.status} body=${JSON.stringify(started.body)}`);
+
+        const r = await call('POST', `/trips/${trip}/accept`, { driverId: DRIVER_FREE, vehicleId: VEHICLE_FREE });
+        check('accept on IN_PROGRESS trip -> 409 INVALID_STATE_TRANSITION',
+            r.status === 409 && r.body?.error?.code === 'INVALID_STATE_TRANSITION', `status=${r.status} body=${JSON.stringify(r.body)}`);
+    }
+    {
+        const r = await call('POST', `/trips/${TRIP.cancelled}/accept`, { driverId: DRIVER, vehicleId: VEHICLE });
+        check('accept on CANCELLED trip -> 409 INVALID_STATE_TRANSITION (behaviour preserved)',
+            r.status === 409 && r.body?.error?.code === 'INVALID_STATE_TRANSITION', `status=${r.status} body=${JSON.stringify(r.body)}`);
+    }
+    {
+        const r = await call('POST', `/trips/${TRIP.completedWithPayment}/accept`, { driverId: DRIVER, vehicleId: VEHICLE });
+        check('accept on COMPLETED trip -> 409 INVALID_STATE_TRANSITION',
+            r.status === 409 && r.body?.error?.code === 'INVALID_STATE_TRANSITION', `status=${r.status} body=${JSON.stringify(r.body)}`);
+    }
+    {
+        const r = await call('POST', `/trips/${UNKNOWN}/accept`, { driverId: DRIVER, vehicleId: VEHICLE });
+        check('accept on unknown trip -> 404 TRIP_NOT_FOUND (not 409)',
+            r.status === 404 && r.body?.error?.code === 'TRIP_NOT_FOUND', `status=${r.status} body=${JSON.stringify(r.body)}`);
+    }
+    {
+        const r = await call('POST', `/trips/${UNKNOWN}/accept`, {});
+        check('accept on unknown trip with no driverId -> 400 MISSING_DRIVER_VEHICLE (validated before the state guard)',
+            r.status === 400 && r.body?.error?.code === 'MISSING_DRIVER_VEHICLE', `status=${r.status} body=${JSON.stringify(r.body)}`);
     }
 }
 
