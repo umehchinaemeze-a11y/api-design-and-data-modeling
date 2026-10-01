@@ -16,7 +16,8 @@ const { TARGET } = require('./lib/target');
  *     (chk_trips_timestamps requires them).
  *  3. Payment eligibility is enforced TWICE on purpose:
  *       - trg_enforce_payment_completion is the authoritative gate. It rejects any
- *         INSERT INTO payments whose trip is not COMPLETED, with SQLSTATE 23514.
+ *         INSERT (or UPDATE of trip_id) whose trip is not COMPLETED, with
+ *         SQLSTATE 23514.
  *       - This server also pre-checks, purely so it can return a precise 409 naming
  *         the offending status instead of a generic 400.
  *     The pre-check is a client-facing convenience; the trigger is what makes the

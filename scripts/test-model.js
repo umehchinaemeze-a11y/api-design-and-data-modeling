@@ -63,11 +63,8 @@ async function runTestSuite() {
 
         const triggersRes = await client.query(`
             SELECT tgname FROM pg_trigger
-            WHERE tgname IN (
-                'trg_enforce_trip_status_transition',
-                'trg_enforce_review_completion',
-                'trg_enforce_payment_completion'
-            ) AND NOT tgisinternal;
+            WHERE tgname IN ('trg_enforce_trip_status_transition', 'trg_enforce_review_completion', 'trg_enforce_payment_completion')
+              AND NOT tgisinternal;
         `);
         assert(triggersRes.rows.length === 3, 'All three lifecycle-enforcement triggers exist in the catalog');
 
@@ -271,6 +268,25 @@ async function runTestSuite() {
             assert(
                 err.code === '23514' && /Payments are only permitted for COMPLETED trips/.test(err.message),
                 'Payment on IN_PROGRESS trip rejected with trigger SQLSTATE 23514 (trg_enforce_payment_completion)', err.message
+            );
+        }
+
+        // Re-pointing an existing payment to a non-COMPLETED trip rejected by the
+        // extended trg_enforce_payment_completion (BEFORE INSERT OR UPDATE OF trip_id).
+        // The seed gives every COMPLETED trip a payment, so the payment for trip 1 is
+        // re-pointed to trip 222 (IN_PROGRESS). Neither payments_trip_id_key (UNIQUE)
+        // nor the foreign key blocks this; only the UPDATE arm of the trigger does.
+        try {
+            await client.query(`
+                UPDATE payments
+                SET trip_id = '${ID.trip(222)}'
+                WHERE trip_id = '${ID.trip(1)}';
+            `);
+            assert(false, 'Re-pointing payment to non-completed trip rejected', 'Allowed payment trip_id update to IN_PROGRESS trip');
+        } catch (err) {
+            assert(
+                err.code === '23514' && /Payments are only permitted for COMPLETED trips/.test(err.message),
+                'Payment re-point to IN_PROGRESS trip rejected with trigger SQLSTATE 23514 (trg_enforce_payment_completion)', err.message
             );
         }
 

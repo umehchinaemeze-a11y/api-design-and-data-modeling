@@ -94,7 +94,7 @@ This repository is an architectural proof and design deliverable. The implementa
 | **FR-08** | Settled money is exact, with no floating-point precision loss | 64-bit integer minor units + ISO-4217 currency + UNIQUE provider reference for idempotency | `trips.fare_amount_minor BIGINT`, `payments.amount_minor BIGINT`, `trips.currency VARCHAR(3)` and `payments.currency VARCHAR(3)` with `CHECK (length = 3)`, `payments.provider_reference VARCHAR(100) UNIQUE` | Schema definition, Invalid Test #4, Valid Test #1, route payment tests |
 | **FR-09** | Reviews allowed only after trip is completed | PostgreSQL Validation Trigger checking Trip status | `trg_enforce_review_completion` | Invalid Test #3 (`23514`) |
 | **FR-10** | At most one review per trip | Unique constraint on `trip_id` | `reviews.trip_id UNIQUE` | Schema definition |
-| **FR-11** | A payment may only be captured for a completed trip | PostgreSQL Validation Trigger checking Trip status, plus an API pre-check for a precise client error | `trg_enforce_payment_completion` | Invalid Test #4 (`23514`), Valid Test #5 |
+| **FR-11** | A payment may only be captured for a completed trip | PostgreSQL Validation Trigger checking Trip status on insert and re-point, plus an API pre-check for a precise client error | `trg_enforce_payment_completion` (`BEFORE INSERT OR UPDATE OF trip_id`) | Invalid Test #4 (`23514`), Invalid Test #5 (`23514`, re-point), Valid Test #6 |
 | **NFR-01** | Unpredictable, non-sequential IDs | UUID primary keys generated via `gen_random_uuid()` | All tables: `id UUID PRIMARY KEY DEFAULT gen_random_uuid()` | Schema definition |
 | **NFR-06** | Sub-millisecond lookup for active rider trip | Partial unique index on `(rider_id)` restricted to active statuses | `idx_trips_single_active_rider` | Query Plan #3 (0.055 ms) |
 | **NFR-06** | High performance driver queue lookup | Partial index on `(requested_at DESC)` | `idx_trips_driver_available_queue` | Query Plan #1 (0.076 ms) |
@@ -601,7 +601,7 @@ EXECUTE FUNCTION enforce_trip_status_transition();
 | `payments` | `payments_trip_id_key` | `UNIQUE(trip_id)` | Exactly one payment record per trip |
 | `payments` | `payments_provider_reference_key` | `UNIQUE(provider_reference)` | Idempotency guard for payment gateway charges |
 | `payments` | `payments_trip_id_fkey` | `FOREIGN KEY` → `trips(id)` `ON DELETE RESTRICT` | Payment cannot outlive or precede its trip record |
-| `payments` | `trg_enforce_payment_completion` | `TRIGGER` (`BEFORE INSERT`) | Prevents payment insertion unless trip is `COMPLETED` |
+| `payments` | `trg_enforce_payment_completion` | `TRIGGER` (`BEFORE INSERT OR UPDATE OF trip_id`) | Prevents payment insertion or re-pointing unless trip is `COMPLETED` |
 | `reviews` | `reviews_trip_id_key` | `UNIQUE(trip_id)` | Exactly zero or one review per completed trip |
 | `reviews` | `reviews_rating_check` | `CHECK` | Rating must be an integer between 1 and 5 |
 | `reviews` | `trg_enforce_review_completion` | `TRIGGER` | Prevents review insertion unless trip is `COMPLETED` |
@@ -626,7 +626,7 @@ EXECUTE FUNCTION enforce_trip_status_transition();
 >
 > | Layer | Mechanism | Role |
 > | :--- | :--- | :--- |
-> | **Database** | `trg_enforce_payment_completion` — `BEFORE INSERT ON payments`, SQLSTATE `23514` | **Authoritative.** Holds for direct SQL, `psql`, a background job, a future service, or any buggy caller that bypasses HTTP entirely. |
+> | **Database** | `trg_enforce_payment_completion` — `BEFORE INSERT OR UPDATE OF trip_id ON payments`, SQLSTATE `23514` | **Authoritative.** Holds for direct SQL, `psql`, a background job, a future service, or any buggy caller that bypasses HTTP entirely. |
 > | **API** | `scripts/dev.js`, `POST /api/v1/trips/:id/payment` | **Client-facing convenience.** Pre-checks the trip status so it can return a precise `409 TRIP_NOT_COMPLETED` naming the offending status, instead of a generic `400`. |
 >
 > The API pre-check is *not* the security boundary; the trigger is. The server
@@ -634,15 +634,19 @@ EXECUTE FUNCTION enforce_trip_status_transition();
 > the error path and returns `409` rather than `400`, so a trip cancelled between
 > the pre-check `SELECT` and the `INSERT` still reports the correct status.
 >
-> `BEFORE INSERT` (rather than `INSERT OR UPDATE`) is sufficient and provably
-> complete: `trg_enforce_trip_status_transition` already freezes a trip once it
-> reaches `COMPLETED`, so a trip that was `COMPLETED` at insert time can never
-> become ineligible afterwards. Re-pointing an existing payment is independently
-> blocked by `payments_trip_id_key` (`UNIQUE`) and `ON DELETE RESTRICT`.
+> `BEFORE INSERT` alone is *not* sufficient, because `payments.trip_id` is
+> mutable. Neither `payments_trip_id_key` (`UNIQUE`, which only forbids two
+> payments sharing a trip) nor the foreign key (which only requires the trip to
+> exist) blocks an existing payment from being re-pointed to a still-open
+> `IN_PROGRESS` trip. The trigger is therefore declared
+> `BEFORE INSERT OR UPDATE OF trip_id`, applying the same `COMPLETED` check to
+> both paths.
 >
 > Proof: `evidence/invalid_operation_4.txt` (all four non-terminal statuses
-> rejected, zero rows leaked) and `evidence/valid_operation_1.txt` (a `COMPLETED`
-> trip still accepts a payment, and `PENDING → COMPLETED → REFUNDED` still works).
+> rejected, zero rows leaked), `evidence/invalid_operation_5.txt` (an existing
+> payment re-pointed to an `IN_PROGRESS` trip is rejected), and
+> `evidence/valid_operation_1.txt` (a `COMPLETED` trip still accepts a payment,
+> and `PENDING → COMPLETED → REFUNDED` still works).
 
 ---
 
@@ -1219,8 +1223,8 @@ If the platform added a bidirectional peer-to-peer VoIP audio calling feature or
 
 ## 26. Invalid-State Database Proofs
 
-Five invalid operations are executed against live PostgreSQL 16 and rejected by
-the engine. A sixth, **valid** operation is run as a control to prove the new
+Six invalid operations are executed against live PostgreSQL 16 and rejected by
+the engine. A seventh, **valid** operation is run as a control to prove the new
 payment gate is not over-broad. The text below mirrors the committed captures in
 `evidence/invalid_operation_*.txt` and `evidence/valid_operation_1.txt`; those
 files are the authoritative copy.
@@ -1271,7 +1275,22 @@ files are the authoritative copy.
   `BEFORE INSERT` gate, so no orphaned payment row survives a rejected attempt.
 - **Capture:** `evidence/invalid_operation_4.txt`
 
-### Invalid State 5: Multiple Active Trips for One Driver
+### Invalid State 5: Payment Re-Pointed to a Non-Completed Trip
+- **Attempted Action:** Updating an existing settled payment's `trip_id` so it points at an `IN_PROGRESS` trip instead of its original `COMPLETED` trip.
+- **Database Engine Response:**
+  ```
+  PostgreSQL SQLSTATE: 23514 (check_violation)
+  Trigger: trg_enforce_payment_completion (BEFORE INSERT OR UPDATE OF trip_id)
+  Message: Payments are only permitted for COMPLETED trips. Current status of trip <uuid> is IN_PROGRESS
+  Leak check: payment still bound to its original COMPLETED trip
+  Verdict: REJECTED BY DATABASE ENGINE (PASS)
+  ```
+  Without the `UPDATE OF trip_id` arm, this write would succeed: the `UNIQUE`
+  constraint only forbids two payments sharing a trip, and the foreign key only
+  requires the target trip to exist.
+- **Capture:** `evidence/invalid_operation_5.txt`
+
+### Invalid State 6: Multiple Active Trips for One Driver
 - **Attempted Action:** Assigning a driver a second active trip. Both branches of the index predicate are exercised — a driver already on an `ACCEPTED` trip is given a second `IN_PROGRESS` trip, and a driver already on an `IN_PROGRESS` trip is given a second `ACCEPTED` trip.
 - **Isolation:** The conflicting rows are written for riders that hold **no** active trip, so `idx_trips_single_active_rider` cannot be the constraint that fires. Without that isolation the rejection would not be attributable to FR-05 rather than FR-04.
 - **Database Engine Response (one rejection per index branch):**
@@ -1288,7 +1307,7 @@ files are the authoritative copy.
   into `409 DRIVER_ALREADY_ON_TRIP` after the engine has already refused the write.
 - **Capture:** `evidence/invalid_operation_6.txt`
 
-### Valid State 6: Payment for a Completed Trip (control)
+### Valid State 7: Payment for a Completed Trip (control)
 
 The complementary control proving the new gate did not break legitimate
 settlement. A `COMPLETED` trip accepts a payment, and the normal

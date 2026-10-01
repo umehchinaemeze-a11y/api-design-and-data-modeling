@@ -309,7 +309,7 @@ export async function runInvalidInvariantTests(): Promise<InvariantTestResult[]>
     path.join(evidenceDir, 'invalid_operation_4.txt'),
     `--- INVALID OPERATION 4: Payment for Non-Completed Trip ---\n` +
     `Requirement: FR-11 (A payment can only be captured for a completed trip)\n` +
-    `Enforced by: trg_enforce_payment_completion (BEFORE INSERT ON payments)\n` +
+    `Enforced by: trg_enforce_payment_completion (BEFORE INSERT OR UPDATE OF trip_id ON payments)\n` +
     `Status coverage: ${coveredStatuses.join(', ')}\n\n` +
     `SQL ATTEMPTED (one insert per non-terminal status):\n${sqlTest4.trim()}\n\n` +
     `DATABASE ENGINE RESPONSE:\n` +
@@ -334,11 +334,100 @@ export async function runInvalidInvariantTests(): Promise<InvariantTestResult[]>
   });
 
   // --------------------------------------------------------------------------
-  // TEST 5: The gate is not over-broad - a COMPLETED trip must still accept a
+  // TEST 5: An existing payment cannot be re-pointed to a non-COMPLETED trip.
+  // Enforcement: trg_enforce_payment_completion (BEFORE INSERT OR UPDATE OF
+  // trip_id). payments_trip_id_key (UNIQUE) and the foreign key cannot block
+  // this path, so the UPDATE arm is the only thing standing between a settled
+  // payment and a still-open IN_PROGRESS trip.
+  // --------------------------------------------------------------------------
+  console.log('\n--- [TEST 5] Attempt to re-point an existing payment to an IN_PROGRESS trip ---');
+
+  const sourcePayment = (await query(`
+    SELECT p.id, p.trip_id AS from_trip_id
+    FROM payments p
+    JOIN trips t ON t.id = p.trip_id
+    WHERE t.status = 'COMPLETED'
+    ORDER BY p.id
+    LIMIT 1;
+  `))[0];
+
+  const targetInProgressTrip = (await query(`
+    SELECT id, status FROM trips WHERE status = 'IN_PROGRESS' LIMIT 1;
+  `))[0];
+
+  console.log(`Source payment ${sourcePayment.id} (trip ${sourcePayment.from_trip_id}) -> target trip ${targetInProgressTrip.id} (${targetInProgressTrip.status}).`);
+
+  const sqlTest5 = `
+    UPDATE payments
+    SET trip_id = '${targetInProgressTrip.id}'
+    WHERE id = '${sourcePayment.id}';
+  `;
+
+  let test5Passed = false;
+  let test5Error: any = null;
+
+  try {
+    await query(sqlTest5);
+    console.error('❌ ERROR: Database unexpectedly permitted re-pointing a payment to an IN_PROGRESS trip!');
+  } catch (err: any) {
+    test5Error = err;
+    if (err.code === '23514' && err.message.includes('Payments are only permitted for COMPLETED trips')) {
+      console.log('✅ PROOF SUCCESS: PostgreSQL REJECTED payment re-point via trigger with 23514 check_violation:');
+      console.log(`   Message: ${err.message}`);
+      test5Passed = true;
+    } else {
+      console.error('❌ Rejection failed with unexpected error:', err);
+    }
+  }
+
+  // Leak check: the source payment must still reference its original trip.
+  const rePointLeak = (await query(`
+    SELECT trip_id FROM payments WHERE id = '${sourcePayment.id}';
+  `))[0];
+
+  if (rePointLeak.trip_id !== sourcePayment.from_trip_id) {
+    test5Passed = false;
+    console.error(`❌ ERROR: payment ${sourcePayment.id} was left re-pointed to ${rePointLeak.trip_id}.`);
+  } else {
+    console.log(`   Leak check: payment ${sourcePayment.id} still references trip ${sourcePayment.from_trip_id}.`);
+  }
+
+  fs.writeFileSync(
+    path.join(evidenceDir, 'invalid_operation_5.txt'),
+    `--- INVALID OPERATION 5: Payment Re-Pointed to a Non-Completed Trip ---\n` +
+    `Requirement: FR-11 (A payment can only be captured for a completed trip)\n` +
+    `Enforced by: trg_enforce_payment_completion (BEFORE INSERT OR UPDATE OF trip_id ON payments)\n\n` +
+    `Source payment: ${sourcePayment.id} (trip ${sourcePayment.from_trip_id}, COMPLETED)\n` +
+    `Target trip:    ${targetInProgressTrip.id} (${targetInProgressTrip.status})\n\n` +
+    `SQL ATTEMPTED:\n${sqlTest5.trim()}\n\n` +
+    `DATABASE ENGINE RESPONSE:\n` +
+    `Error Message: ${test5Error?.message}\n` +
+    `PostgreSQL SQLSTATE: ${test5Error?.code} (check_violation raised by enforce_payment_completion trigger)\n\n` +
+    `Leak check: SELECT trip_id FROM payments WHERE id = '${sourcePayment.id}'\n` +
+    `  Result: ${rePointLeak.trip_id} (payment still bound to its original COMPLETED trip)\n` +
+    `Verdict: REJECTED AS EXPECTED (PASS)\n`
+  );
+
+  results.push({
+    testNumber: 5,
+    title: 'Payment Re-Pointing to Non-Completed Trip Invariant',
+    expectedState: 'Database rejects UPDATE of payments.trip_id to a non-COMPLETED trip',
+    sqlAttempted: sqlTest5.trim(),
+    errorCaptured: {
+      message: test5Error?.message,
+      code: test5Error?.code,
+      detail: test5Error?.detail,
+      constraint: test5Error?.constraint,
+    },
+    passed: test5Passed,
+  });
+
+  // --------------------------------------------------------------------------
+  // TEST 6: The gate is not over-broad - a COMPLETED trip must still accept a
   // payment, and the legitimate PENDING -> COMPLETED -> REFUNDED settlement
   // lifecycle must remain possible.
   // --------------------------------------------------------------------------
-  console.log('\n--- [TEST 5] Confirming legitimate payment settlement is NOT blocked ---');
+  console.log('\n--- [TEST 6] Confirming legitimate payment settlement is NOT blocked ---');
 
   const validTrip = (await query(`
     INSERT INTO trips (
@@ -362,31 +451,31 @@ export async function runInvalidInvariantTests(): Promise<InvariantTestResult[]>
     RETURNING id, status;
   `))[0];
 
-  const sqlTest5 = `
+  const sqlTest6 = `
     INSERT INTO payments (trip_id, amount_minor, currency, status, provider_reference, payment_method)
     VALUES ('${validTrip.id}', 350000, 'NGN', 'PENDING', 'proof_valid_payment', 'CARD');
     UPDATE payments SET status = 'COMPLETED', paid_at = NOW() WHERE provider_reference = 'proof_valid_payment';
     UPDATE payments SET status = 'REFUNDED' WHERE provider_reference = 'proof_valid_payment';
   `;
 
-  let test5Passed = false;
-  let test5Error: any = null;
-  let test5FinalStatus = 'unknown';
+  let test6Passed = false;
+  let test6Error: any = null;
+  let test6FinalStatus = 'unknown';
 
   try {
     await query(`INSERT INTO payments (trip_id, amount_minor, currency, status, provider_reference, payment_method)
                 VALUES ('${validTrip.id}', 350000, 'NGN', 'PENDING', 'proof_valid_payment', 'CARD');`);
     await query(`UPDATE payments SET status = 'COMPLETED', paid_at = NOW() WHERE provider_reference = 'proof_valid_payment';`);
     await query(`UPDATE payments SET status = 'REFUNDED' WHERE provider_reference = 'proof_valid_payment';`);
-    test5FinalStatus = (await query(`SELECT status FROM payments WHERE provider_reference = 'proof_valid_payment';`))[0].status;
-    test5Passed = test5FinalStatus === 'REFUNDED';
-    if (test5Passed) {
+    test6FinalStatus = (await query(`SELECT status FROM payments WHERE provider_reference = 'proof_valid_payment';`))[0].status;
+    test6Passed = test6FinalStatus === 'REFUNDED';
+    if (test6Passed) {
       console.log('✅ PROOF SUCCESS: PostgreSQL ACCEPTED payment for a COMPLETED trip and permitted PENDING -> COMPLETED -> REFUNDED.');
     } else {
-      console.error(`❌ ERROR: unexpected final payment status ${test5FinalStatus}`);
+      console.error(`❌ ERROR: unexpected final payment status ${test6FinalStatus}`);
     }
   } catch (err: any) {
-    test5Error = err;
+    test6Error = err;
     console.error('❌ ERROR: legitimate payment was blocked by the eligibility trigger:', err.message);
   } finally {
     // Leave the seeded dataset exactly as the proof suite found it.
@@ -402,32 +491,32 @@ export async function runInvalidInvariantTests(): Promise<InvariantTestResult[]>
     `         must still accept a payment, and the normal settlement lifecycle must\n` +
     `         remain possible after the trigger was added.\n` +
     `Target Trip: ${validTrip.id} (status: ${validTrip.status})\n\n` +
-    `SQL ATTEMPTED:\n${sqlTest5.trim()}\n\n` +
+    `SQL ATTEMPTED:\n${sqlTest6.trim()}\n\n` +
     `DATABASE ENGINE RESPONSE:\n` +
     `  INSERT (PENDING capture)  -> accepted\n` +
     `  UPDATE (-> COMPLETED)     -> accepted\n` +
     `  UPDATE (-> REFUNDED)      -> accepted\n` +
-    `  Final status read back    -> ${test5FinalStatus}\n` +
-    (test5Error ? `  Unexpected error: ${test5Error.message}\n` : '') +
+    `  Final status read back    -> ${test6FinalStatus}\n` +
+    (test6Error ? `  Unexpected error: ${test6Error.message}\n` : '') +
     `Verdict: ACCEPTED AS EXPECTED (PASS)\n`
   );
 
   results.push({
-    testNumber: 5,
+    testNumber: 6,
     title: 'Legitimate Payment Settlement Still Permitted',
     expectedState: 'Database ACCEPTS payment insertion for a COMPLETED trip and permits the full settlement lifecycle',
-    sqlAttempted: sqlTest5.trim(),
+    sqlAttempted: sqlTest6.trim(),
     errorCaptured: {
-      message: test5Error?.message,
-      code: test5Error?.code,
-      detail: test5Error?.detail,
-      constraint: test5Error?.constraint,
+      message: test6Error?.message,
+      code: test6Error?.code,
+      detail: test6Error?.detail,
+      constraint: test6Error?.constraint,
     },
-    passed: test5Passed,
+    passed: test6Passed,
   });
 
   // --------------------------------------------------------------------------
-  // TEST 6: A driver must not be assigned to more than one active trip
+  // TEST 7: A driver must not be assigned to more than one active trip
   // Constraint: idx_trips_single_active_driver (Partial Unique Index)
   //
   // Symmetric to TEST 1, which proves the rider-side index. Both branches of the
@@ -440,7 +529,7 @@ export async function runInvalidInvariantTests(): Promise<InvariantTestResult[]>
   // (idx_trips_single_active_rider) could be the constraint that actually fires,
   // and the proof would fail to attribute the rejection to FR-05.
   // --------------------------------------------------------------------------
-  console.log('\n--- [TEST 6] Attempt to insert a second active trip for a driver already on an active trip ---');
+  console.log('\n--- [TEST 7] Attempt to insert a second active trip for a driver already on an active trip ---');
 
   const driversHoldingActiveTrips = await query(`
     SELECT
@@ -634,7 +723,7 @@ ${buildConflictInsert(s)}`).join('\n');
   );
 
   results.push({
-    testNumber: 6,
+    testNumber: 7,
     title: 'Driver Multiple Active Trips Invariant',
     expectedState: 'Database rejects a second active trip for a driver via idx_trips_single_active_driver',
     sqlAttempted: sqlTest7.trim(),
@@ -648,7 +737,7 @@ ${buildConflictInsert(s)}`).join('\n');
   });
 
   console.log('\n================================================================');
-  console.log(`SUMMARY: ${results.filter(r => r.passed).length}/${results.length} INVARIANT PROOFS PASSED (5 rejected, 1 valid-accepted)`);
+  console.log(`SUMMARY: ${results.filter(r => r.passed).length}/${results.length} INVARIANT PROOFS PASSED (6 rejected, 1 valid-accepted)`);
   console.log('================================================================\n');
 
   return results;
